@@ -22,7 +22,7 @@ import numpy as np
 sys.path.insert(0, '.')
 
 from fusion.fusion_system import FusionSystem
-from fusion.models.fusion_unet import PlaceholderFusion
+from fusionNet.fusion_unet import PlaceholderFusion
 
 
 def create_dummy_data(size=(224, 224)):

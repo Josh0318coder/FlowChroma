@@ -30,12 +30,12 @@ FlowChroma/
 │   ├── train.py              # SwinTExCo training script
 │   └── inference.py          # SwinTExCo inference
 │
-├── unet/                     # Fusion UNet
+├── fusionNet/                # Fusion UNet
 │   ├── fusion_unet.py        # 3 種融合網絡架構
 │   └── __init__.py
 │
 ├── train/                    # FlowChroma 訓練系統
-│   ├── fusion_system.py      # 系統集成（加載 mem + swin + unet）
+│   ├── fusion_system.py      # 系統集成（加載 mem + swin + fusionNet）
 │   ├── fusion_loss.py        # 組合損失函數
 │   ├── fusion_dataset.py     # 在線數據加載器
 │   ├── train.py              # FlowChroma 訓練腳本
