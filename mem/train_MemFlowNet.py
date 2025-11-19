@@ -16,7 +16,7 @@ from core.Networks import build_network
 import os
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import evaluate_MemFlowNet
+# import evaluate_MemFlowNet  # Removed: not needed for colorization training
 try:
     from torch.cuda.amp import GradScaler
 except:
@@ -80,28 +80,30 @@ def train(gpu, cfg):
 
     model.train()
 
-    if cfg.eval_only:
-        for val_dataset in cfg.validation:
-            results = {}
-            if val_dataset == 'sintel_train':
-                results.update(evaluate_MemFlowNet.validate_sintel(model.module, cfg, rank))
-            elif val_dataset == 'spring_train':
-                results.update(evaluate_MemFlowNet.validate_spring(model.module, cfg, rank))
-            elif val_dataset == 'spring_subset_val':
-                results.update(
-                    evaluate_MemFlowNet.validate_spring(model.module, cfg, rank, split='subset_val'))
-            elif val_dataset == 'things':
-                results.update(evaluate_MemFlowNet.validate_things(model.module, cfg, rank))
-            elif val_dataset == 'kitti':
-                results.update(evaluate_MemFlowNet.validate_kitti(model.module, cfg, rank))
-            elif val_dataset == 'sintel_submission':
-                evaluate_MemFlowNet.create_sintel_submission(model.module, cfg, output_path=cfg.suffix)
-            elif val_dataset == 'spring_submission':
-                evaluate_MemFlowNet.create_spring_submission(model.module, cfg, output_path=cfg.suffix, rank=rank)
-            elif val_dataset == 'kitti_submission':
-                evaluate_MemFlowNet.create_kitti_submission(model.module, cfg, output_path=cfg.suffix)
-            print(results)
-        return
+    # Removed: eval_only mode not needed for colorization training
+    # This section was for optical flow benchmark validation (Sintel, KITTI, Spring)
+    # if cfg.eval_only:
+    #     for val_dataset in cfg.validation:
+    #         results = {}
+    #         if val_dataset == 'sintel_train':
+    #             results.update(evaluate_MemFlowNet.validate_sintel(model.module, cfg, rank))
+    #         elif val_dataset == 'spring_train':
+    #             results.update(evaluate_MemFlowNet.validate_spring(model.module, cfg, rank))
+    #         elif val_dataset == 'spring_subset_val':
+    #             results.update(
+    #                 evaluate_MemFlowNet.validate_spring(model.module, cfg, rank, split='subset_val'))
+    #         elif val_dataset == 'things':
+    #             results.update(evaluate_MemFlowNet.validate_things(model.module, cfg, rank))
+    #         elif val_dataset == 'kitti':
+    #             results.update(evaluate_MemFlowNet.validate_kitti(model.module, cfg, rank))
+    #         elif val_dataset == 'sintel_submission':
+    #             evaluate_MemFlowNet.create_sintel_submission(model.module, cfg, output_path=cfg.suffix)
+    #         elif val_dataset == 'spring_submission':
+    #             evaluate_MemFlowNet.create_spring_submission(model.module, cfg, output_path=cfg.suffix, rank=rank)
+    #         elif val_dataset == 'kitti_submission':
+    #             evaluate_MemFlowNet.create_kitti_submission(model.module, cfg, output_path=cfg.suffix)
+    #         print(results)
+    #     return
 
     if cfg.DDP:
         train_sampler, train_loader = datasets.fetch_dataloader(cfg, DDP=cfg.DDP, rank=rank)
@@ -186,8 +188,9 @@ def train(gpu, cfg):
             if rank == 0:
                 logger.push(metrics)
 
+            # Save checkpoint periodically (kept for training)
             if total_steps % cfg.val_freq == cfg.val_freq - 1 and rank == 0:
-                print('start validation')
+                print('Saving checkpoint...')
                 PATH = '%s/%d_%s.pth' % (cfg.log_dir, total_steps + 1, cfg.name)
                 torch.save({
                     'iteration': total_steps,
@@ -195,22 +198,24 @@ def train(gpu, cfg):
                     'optimizer': optimizer.state_dict(),
                     'model': model.module.state_dict(),
                 }, PATH)
-            if total_steps % cfg.val_freq == cfg.val_freq - 1:
-                results = {}
-                for val_dataset in cfg.validation:
-                    if val_dataset == 'sintel_train':
-                        results.update(evaluate_MemFlowNet.validate_sintel(model.module, cfg, rank))
-                    elif val_dataset == 'kitti':
-                        results.update(evaluate_MemFlowNet.validate_kitti(model.module, cfg, rank))
-                    elif val_dataset == 'spring_subset_val':
-                        results.update(evaluate_MemFlowNet.validate_spring(model.module, cfg, rank, split='subset_val'))
 
-                model.train()
-            if total_steps % cfg.val_freq == cfg.val_freq - 1 and rank == 0:
-                logger.write_dict(results)
-
-            if total_steps % cfg.val_freq == cfg.val_freq - 1:
-                dist.barrier()
+            # Removed: validation on optical flow benchmarks not needed for colorization
+            # if total_steps % cfg.val_freq == cfg.val_freq - 1:
+            #     results = {}
+            #     for val_dataset in cfg.validation:
+            #         if val_dataset == 'sintel_train':
+            #             results.update(evaluate_MemFlowNet.validate_sintel(model.module, cfg, rank))
+            #         elif val_dataset == 'kitti':
+            #             results.update(evaluate_MemFlowNet.validate_kitti(model.module, cfg, rank))
+            #         elif val_dataset == 'spring_subset_val':
+            #             results.update(evaluate_MemFlowNet.validate_spring(model.module, cfg, rank, split='subset_val'))
+            #
+            #     model.train()
+            # if total_steps % cfg.val_freq == cfg.val_freq - 1 and rank == 0:
+            #     logger.write_dict(results)
+            #
+            # if total_steps % cfg.val_freq == cfg.val_freq - 1:
+            #     dist.barrier()
 
             total_steps += 1
 
