@@ -5,7 +5,7 @@ Integrates MemFlow, SwinTExCo, and Fusion UNet into a complete training/inferenc
 
 Usage:
     from fusion.fusion_system import FusionSystem
-    from fusion.models.fusion_unet import SimpleFusionNet
+    from fusionNet.fusion_unet import SimpleFusionNet
 
     system = FusionSystem(
         memflow_path='../MyFlow',
@@ -85,7 +85,7 @@ class FusionSystem(nn.Module):
         print("="*60)
 
         if fusion_net is None:
-            from fusion.models.fusion_unet import PlaceholderFusion
+            from fusionNet.fusion_unet import PlaceholderFusion
             self.fusion_unet = PlaceholderFusion().to(device)
             print("Using PlaceholderFusion (testing mode)")
         else:

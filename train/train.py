@@ -27,7 +27,7 @@ from tqdm import tqdm
 sys.path.insert(0, '.')
 
 from fusion.fusion_system import FusionSystem
-from fusion.models.fusion_unet import SimpleFusionNet
+from fusionNet.fusion_unet import SimpleFusionNet
 from fusion.fusion_loss import FusionLoss
 from fusion.fusion_dataset import FusionDataset
 
