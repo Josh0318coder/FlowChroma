@@ -6,10 +6,10 @@ Uses PlaceholderFusion to test data flow.
 
 Usage:
     python fusion/test.py \
-        --memflow_path ../MyFlow \
-        --swintexco_path ../swinthxco_single \
-        --memflow_ckpt ../MyFlow/checkpoints/memflow_best.pth \
-        --swintexco_ckpt ../swinthxco_single/checkpoints/best/
+        --memflow_path ../MemFlow \
+        --swintexco_path ../SwinSingle \
+        --memflow_ckpt ../MemFlow/checkpoints/memflow_best.pth \
+        --swintexco_ckpt ../SwinSingle/checkpoints/best/
 """
 
 import argparse

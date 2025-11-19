@@ -8,9 +8,9 @@
 
 ```bash
 # 從 swinthxco_single 倉庫複製
-cp -r swinthxco_single/src ./swin/
-cp swinthxco_single/inference.py ./swin/
-cp swinthxco_single/train.py ./swin/
+cp -r swinthxco_single/src ./SwinSingle/
+cp swinthxco_single/inference.py ./SwinSingle/
+cp swinthxco_single/train.py ./SwinSingle/
 ```
 
 ## 必要修改
@@ -32,7 +32,7 @@ return IA_ab_predict, nonlocal_BA_lab, similarity_map
 ## 目錄結構
 
 ```
-swin/
+SwinSingle/
 ├── src/
 │   ├── models/
 │   │   ├── CNN/

@@ -5,10 +5,10 @@ Online training mode: runs MemFlow and SwinTExCo on-the-fly for each batch.
 
 Usage:
     python fusion/train.py \
-        --memflow_path ../MyFlow \
-        --swintexco_path ../swinthxco_single \
-        --memflow_ckpt ../MyFlow/checkpoints/memflow_best.pth \
-        --swintexco_ckpt ../swinthxco_single/checkpoints/best/ \
+        --memflow_path ../MemFlow \
+        --swintexco_path ../SwinSingle \
+        --memflow_ckpt ../MemFlow/checkpoints/memflow_best.pth \
+        --swintexco_ckpt ../SwinSingle/checkpoints/best/ \
         --data_root /path/to/train_videos \
         --batch_size 2 \
         --epochs 50
@@ -27,7 +27,7 @@ from tqdm import tqdm
 sys.path.insert(0, '.')
 
 from fusion.fusion_system import FusionSystem
-from fusionNet.fusion_unet import SimpleFusionNet
+from FusionNet.fusion_unet import SimpleFusionNet
 from fusion.fusion_loss import FusionLoss
 from fusion.fusion_dataset import FusionDataset
 
@@ -160,9 +160,9 @@ def main():
 
     # Paths
     parser.add_argument('--memflow_path', type=str, required=True,
-                        help='Path to MyFlow repository')
+                        help='Path to MemFlow repository')
     parser.add_argument('--swintexco_path', type=str, required=True,
-                        help='Path to swinthxco_single repository')
+                        help='Path to SwinSingle repository')
     parser.add_argument('--memflow_ckpt', type=str, required=True,
                         help='Path to MemFlow checkpoint')
     parser.add_argument('--swintexco_ckpt', type=str, required=True,

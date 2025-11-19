@@ -19,23 +19,23 @@ Unlike traditional video colorization methods that rely on 3D CNNs or recurrent 
 
 ```
 FlowChroma/
-├── mem/                      # MemFlow variant
+├── MemFlow/                  # MemFlow variant
 │   ├── core/                 # MemFlow network architecture
 │   ├── configs/              # Training configurations
 │   ├── train_MemFlowNet.py   # MemFlow training script
 │   └── inference_color.py    # MemFlow inference with confidence
 │
-├── swin/                     # SwinTExCo variant (需手動添加)
+├── SwinSingle/               # SwinTExCo variant (需手動添加)
 │   ├── src/                  # SwinTExCo source code
 │   ├── train.py              # SwinTExCo training script
 │   └── inference.py          # SwinTExCo inference
 │
-├── fusionNet/                # Fusion UNet
+├── FusionNet/                # Fusion UNet
 │   ├── fusion_unet.py        # 3 種融合網絡架構
 │   └── __init__.py
 │
 ├── train/                    # FlowChroma 訓練系統
-│   ├── fusion_system.py      # 系統集成（加載 mem + swin + fusionNet）
+│   ├── fusion_system.py      # 系統集成（加載 MemFlow + SwinSingle + FusionNet）
 │   ├── fusion_loss.py        # 組合損失函數
 │   ├── fusion_dataset.py     # 在線數據加載器
 │   ├── train.py              # FlowChroma 訓練腳本
@@ -80,16 +80,16 @@ Input: Video Frame (LAB)
 ### 1. 訓練 MemFlow
 
 ```bash
-cd mem/
+cd MemFlow/
 python train_MemFlowNet.py --config configs/colorization_memflownet.py
 ```
 
 ### 2. 訓練 SwinTExCo
 
-首先確保已將 swinthxco_single 代碼複製到 `swin/` 目錄（參見 `swin/README.md`）
+首先確保已將 swinthxco_single 代碼複製到 `SwinSingle/` 目錄（參見 `SwinSingle/README.md`）
 
 ```bash
-cd swin/
+cd SwinSingle/
 python train.py --config your_config
 ```
 
@@ -98,8 +98,8 @@ python train.py --config your_config
 ```bash
 cd train/
 python train.py \
-    --memflow_path ../mem \
-    --swintexco_path ../swin \
+    --memflow_path ../MemFlow \
+    --swintexco_path ../SwinSingle \
     --memflow_ckpt ../checkpoints/memflow_best.pth \
     --swintexco_ckpt ../checkpoints/swintexco_best/ \
     --data_root /path/to/data \
