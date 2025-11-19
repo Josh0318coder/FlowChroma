@@ -5,11 +5,11 @@ Integrates MemFlow, SwinTExCo, and Fusion UNet into a complete training/inferenc
 
 Usage:
     from fusion.fusion_system import FusionSystem
-    from fusionNet.fusion_unet import SimpleFusionNet
+    from FusionNet.fusion_unet import SimpleFusionNet
 
     system = FusionSystem(
-        memflow_path='../MyFlow',
-        swintexco_path='../swinthxco_single',
+        memflow_path='../MemFlow',
+        swintexco_path='../SwinSingle',
         memflow_ckpt='checkpoints/memflow_best.pth',
         swintexco_ckpt='checkpoints/best/',
         fusion_net=SimpleFusionNet()
@@ -46,8 +46,8 @@ class FusionSystem(nn.Module):
                  device='cuda'):
         """
         Args:
-            memflow_path: Path to MyFlow repository
-            swintexco_path: Path to swinthxco_single repository
+            memflow_path: Path to MemFlow repository
+            swintexco_path: Path to SwinSingle repository
             memflow_ckpt: Path to MemFlow checkpoint
             swintexco_ckpt: Path to SwinTExCo checkpoint directory
             fusion_net: Fusion network instance (default: PlaceholderFusion)
@@ -85,7 +85,7 @@ class FusionSystem(nn.Module):
         print("="*60)
 
         if fusion_net is None:
-            from fusionNet.fusion_unet import PlaceholderFusion
+            from FusionNet.fusion_unet import PlaceholderFusion
             self.fusion_unet = PlaceholderFusion().to(device)
             print("Using PlaceholderFusion (testing mode)")
         else:
@@ -124,7 +124,7 @@ class FusionSystem(nn.Module):
 
         except Exception as e:
             raise RuntimeError(f"Failed to load MemFlow: {e}\n"
-                             f"Make sure memflow_path points to MyFlow repository")
+                             f"Make sure memflow_path points to MemFlow repository")
 
     def _load_swintexco(self, checkpoint_path):
         """Load SwinTExCo model"""
@@ -141,7 +141,7 @@ class FusionSystem(nn.Module):
 
         except Exception as e:
             raise RuntimeError(f"Failed to load SwinTExCo: {e}\n"
-                             f"Make sure swintexco_path points to swinthxco_single repository\n"
+                             f"Make sure swintexco_path points to SwinSingle repository\n"
                              f"and similarity_map modifications are applied")
 
     def reset_memory(self):
