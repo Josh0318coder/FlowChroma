@@ -173,6 +173,10 @@ class FusionSystem(nn.Module):
         """
         self.curr_ti += 1
 
+        # Ensure fp16 for FlashAttention compatibility
+        frame_t = frame_t.half()
+        frame_t1 = frame_t1.half()
+
         # Prepare input
         images_norm = torch.stack([frame_t, frame_t1], dim=1)  # [B, 2, 3, H, W]
 
