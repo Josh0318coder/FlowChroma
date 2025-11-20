@@ -196,17 +196,16 @@ class FusionSystem(nn.Module):
                 ref_keys = torch.cat([self.memflow_memory.half(), key.unsqueeze(2).half()], dim=2)
 
             # Convert all tensors to fp16 for FlashAttention
-            # Note: coords must remain fp32 for grid_sample operations
+            # Note: coords and fmaps must remain fp32 for grid_sample operations
             query_fp16 = query.unsqueeze(2).half()
             ref_keys_fp16 = ref_keys
             ref_values_fp16 = ref_values
             net_fp16 = [n.half() if n is not None else None for n in net]
             inp_fp16 = inp.half()
-            fmaps_fp16 = fmaps.half()
 
-            # Predict flow
+            # Predict flow (coords and fmaps stay as fp32)
             flow_predictions, current_value, confidence_map = self.memflow.predict_flow(
-                net_fp16, inp_fp16, coords0, coords1, fmaps_fp16,
+                net_fp16, inp_fp16, coords0, coords1, fmaps,
                 query_fp16, ref_keys_fp16, ref_values_fp16
             )
 
