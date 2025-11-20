@@ -117,8 +117,8 @@ class FusionSystem(nn.Module):
             else:
                 model.load_state_dict(ckpt, strict=False)
 
-            # Convert to half precision for FlashAttention compatibility
-            model = model.half()
+            # Keep model in fp32, will use autocast for mixed precision
+            # This matches the original training setup
 
             # Freeze and eval
             model.eval()
@@ -141,11 +141,7 @@ class FusionSystem(nn.Module):
                 device=self.device
             )
 
-            # Convert to half precision for consistency
-            model.colornet = model.colornet.half()
-            model.nonlocal_net = model.nonlocal_net.half()
-            model.embed_net = model.embed_net.half()
-
+            # Keep model in fp32, will use autocast for mixed precision
             # Already frozen in SwinTExCo.__init__
             return model
 
@@ -173,14 +169,10 @@ class FusionSystem(nn.Module):
         """
         self.curr_ti += 1
 
-        # Ensure fp16 for FlashAttention compatibility
-        frame_t = frame_t.half()
-        frame_t1 = frame_t1.half()
-
         # Prepare input
         images_norm = torch.stack([frame_t, frame_t1], dim=1)  # [B, 2, 3, H, W]
 
-        with torch.no_grad():
+        with torch.no_grad(), autocast(enabled=True):
             # Encode context
             query, key, net, inp = self.memflow.encode_context(images_norm[:, 0, ...])
 
@@ -190,23 +182,15 @@ class FusionSystem(nn.Module):
             # Memory management
             if self.curr_ti == 0:
                 ref_values = None
-                ref_keys = key.unsqueeze(2).half()
+                ref_keys = key.unsqueeze(2)
             else:
-                ref_values = self.memflow_memory.half() if self.memflow_memory is not None else None
-                ref_keys = torch.cat([self.memflow_memory.half(), key.unsqueeze(2).half()], dim=2)
+                ref_values = self.memflow_memory
+                ref_keys = torch.cat([self.memflow_memory, key.unsqueeze(2)], dim=2)
 
-            # Convert all tensors to fp16 for FlashAttention
-            # Note: coords and fmaps must remain fp32 for grid_sample operations
-            query_fp16 = query.unsqueeze(2).half()
-            ref_keys_fp16 = ref_keys
-            ref_values_fp16 = ref_values
-            net_fp16 = [n.half() if n is not None else None for n in net]
-            inp_fp16 = inp.half()
-
-            # Predict flow (coords and fmaps stay as fp32)
+            # Predict flow with autocast (FlashAttention will get fp16 automatically)
             flow_predictions, current_value, confidence_map = self.memflow.predict_flow(
-                net_fp16, inp_fp16, coords0, coords1, fmaps,
-                query_fp16, ref_keys_fp16, ref_values_fp16
+                net, inp, coords0, coords1, fmaps,
+                query.unsqueeze(2), ref_keys, ref_values
             )
 
             # Update memory
