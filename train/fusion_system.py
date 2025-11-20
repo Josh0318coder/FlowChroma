@@ -56,14 +56,16 @@ class FusionSystem(nn.Module):
         super().__init__()
 
         self.device = device
-        self.memflow_path = memflow_path
-        self.swintexco_path = swintexco_path
+
+        # Convert to absolute paths
+        self.memflow_path = os.path.abspath(memflow_path)
+        self.swintexco_path = os.path.abspath(swintexco_path)
 
         # Add paths for imports
-        if memflow_path not in sys.path:
-            sys.path.insert(0, memflow_path)
-        if swintexco_path not in sys.path:
-            sys.path.insert(0, swintexco_path)
+        if self.memflow_path not in sys.path:
+            sys.path.insert(0, self.memflow_path)
+        if self.swintexco_path not in sys.path:
+            sys.path.insert(0, self.swintexco_path)
 
         # ============ Load MemFlow ============
         print("="*60)
