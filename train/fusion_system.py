@@ -144,7 +144,7 @@ class FusionSystem(nn.Module):
             # Convert to half precision for consistency
             model.colornet = model.colornet.half()
             model.nonlocal_net = model.nonlocal_net.half()
-            model.vit_model = model.vit_model.half()
+            model.embed_net = model.embed_net.half()
 
             # Already frozen in SwinTExCo.__init__
             return model
