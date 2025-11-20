@@ -117,6 +117,9 @@ class FusionSystem(nn.Module):
             else:
                 model.load_state_dict(ckpt, strict=False)
 
+            # Convert to half precision for FlashAttention compatibility
+            model = model.half()
+
             # Freeze and eval
             model.eval()
             for param in model.parameters():
@@ -137,6 +140,11 @@ class FusionSystem(nn.Module):
                 weights_path=checkpoint_path,
                 device=self.device
             )
+
+            # Convert to half precision for consistency
+            model.colornet = model.colornet.half()
+            model.nonlocal_net = model.nonlocal_net.half()
+            model.vit_model = model.vit_model.half()
 
             # Already frozen in SwinTExCo.__init__
             return model
@@ -164,6 +172,10 @@ class FusionSystem(nn.Module):
             memflow_conf: [B, 1, H, W]
         """
         self.curr_ti += 1
+
+        # Ensure fp16 for FlashAttention compatibility
+        frame_t = frame_t.half()
+        frame_t1 = frame_t1.half()
 
         # Prepare input
         images_norm = torch.stack([frame_t, frame_t1], dim=1)  # [B, 2, 3, H, W]
