@@ -23,13 +23,13 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 
-# Add fusion to path
+# Add parent directory to path for imports
 sys.path.insert(0, '.')
 
-from fusion.fusion_system import FusionSystem
+from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import SimpleFusionNet
-from fusion.fusion_loss import FusionLoss
-from fusion.fusion_dataset import FusionDataset
+from train.fusion_loss import FusionLoss
+from train.fusion_dataset import FusionDataset
 
 
 def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):

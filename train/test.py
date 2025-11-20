@@ -18,11 +18,11 @@ import torch
 from PIL import Image
 import numpy as np
 
-# Add fusion to path
+# Add parent directory to path for imports
 sys.path.insert(0, '.')
 
-from fusion.fusion_system import FusionSystem
-from fusionNet.fusion_unet import PlaceholderFusion
+from train.fusion_system import FusionSystem
+from FusionNet.fusion_unet import PlaceholderFusion
 
 
 def create_dummy_data(size=(224, 224)):
