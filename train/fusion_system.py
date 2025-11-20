@@ -117,6 +117,9 @@ class FusionSystem(nn.Module):
             else:
                 model.load_state_dict(ckpt, strict=False)
 
+            # Convert to half precision for FlashAttention compatibility
+            model = model.half()
+
             # Freeze and eval
             model.eval()
             for param in model.parameters():
@@ -137,6 +140,11 @@ class FusionSystem(nn.Module):
                 weights_path=checkpoint_path,
                 device=self.device
             )
+
+            # Convert to half precision for consistency
+            model.colornet = model.colornet.half()
+            model.nonlocal_net = model.nonlocal_net.half()
+            model.vit_model = model.vit_model.half()
 
             # Already frozen in SwinTExCo.__init__
             return model
