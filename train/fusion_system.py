@@ -203,7 +203,7 @@ class FusionSystem(nn.Module):
             inp_fp16 = inp.half()
             coords0_fp16 = coords0.half()
             coords1_fp16 = coords1.half()
-            fmaps_fp16 = [f.half() for f in fmaps]
+            fmaps_fp16 = fmaps.half()
 
             # Predict flow
             flow_predictions, current_value, confidence_map = self.memflow.predict_flow(
