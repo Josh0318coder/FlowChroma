@@ -190,15 +190,25 @@ class FusionSystem(nn.Module):
             # Memory management
             if self.curr_ti == 0:
                 ref_values = None
-                ref_keys = key.unsqueeze(2)
+                ref_keys = key.unsqueeze(2).half()
             else:
-                ref_values = self.memflow_memory
-                ref_keys = torch.cat([self.memflow_memory, key.unsqueeze(2)], dim=2)
+                ref_values = self.memflow_memory.half() if self.memflow_memory is not None else None
+                ref_keys = torch.cat([self.memflow_memory.half(), key.unsqueeze(2).half()], dim=2)
+
+            # Convert all tensors to fp16 for FlashAttention
+            query_fp16 = query.unsqueeze(2).half()
+            ref_keys_fp16 = ref_keys
+            ref_values_fp16 = ref_values
+            net_fp16 = [n.half() if n is not None else None for n in net]
+            inp_fp16 = inp.half()
+            coords0_fp16 = coords0.half()
+            coords1_fp16 = coords1.half()
+            fmaps_fp16 = [f.half() for f in fmaps]
 
             # Predict flow
             flow_predictions, current_value, confidence_map = self.memflow.predict_flow(
-                net, inp, coords0, coords1, fmaps,
-                query.unsqueeze(2), ref_keys, ref_values
+                net_fp16, inp_fp16, coords0_fp16, coords1_fp16, fmaps_fp16,
+                query_fp16, ref_keys_fp16, ref_values_fp16
             )
 
             # Update memory
