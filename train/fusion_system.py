@@ -144,7 +144,7 @@ class FusionSystem(nn.Module):
             # Convert to half precision for consistency
             model.colornet = model.colornet.half()
             model.nonlocal_net = model.nonlocal_net.half()
-            model.vit_model = model.vit_model.half()
+            model.embed_net = model.embed_net.half()
 
             # Already frozen in SwinTExCo.__init__
             return model
@@ -196,18 +196,17 @@ class FusionSystem(nn.Module):
                 ref_keys = torch.cat([self.memflow_memory.half(), key.unsqueeze(2).half()], dim=2)
 
             # Convert all tensors to fp16 for FlashAttention
+            # Note: coords must remain fp32 for grid_sample operations
             query_fp16 = query.unsqueeze(2).half()
             ref_keys_fp16 = ref_keys
             ref_values_fp16 = ref_values
             net_fp16 = [n.half() if n is not None else None for n in net]
             inp_fp16 = inp.half()
-            coords0_fp16 = coords0.half()
-            coords1_fp16 = coords1.half()
-            fmaps_fp16 = [f.half() for f in fmaps]
+            fmaps_fp16 = fmaps.half()
 
             # Predict flow
             flow_predictions, current_value, confidence_map = self.memflow.predict_flow(
-                net_fp16, inp_fp16, coords0_fp16, coords1_fp16, fmaps_fp16,
+                net_fp16, inp_fp16, coords0, coords1, fmaps_fp16,
                 query_fp16, ref_keys_fp16, ref_values_fp16
             )
 
