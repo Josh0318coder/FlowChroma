@@ -1,0 +1,136 @@
+# SwinTExCo 訓練配置文件 - RTX 5090 優化
+# 使用方式: python train_with_config.py --config configs_rtx5090.yaml
+
+# ============================================
+# 資料集配置
+# ============================================
+data:
+  # 視頻資料集路徑 (多個路徑用逗號分隔)
+  video_data_root_list:
+    - ../dataset/DAVIS/davis_videos
+    - ../dataset/Hollywood2_Pixabay/images
+    - ../dataset/NTIRE/ntire_videos
+    - ../dataset/REDS/reds
+
+  # ImageNet 資料集
+  data_root_imagenet: ../dataset/ImageNet/imagenet-vc
+
+  # 標註文件路徑
+  annotation_file_path_list:
+    - ../dataset/DAVIS/davis_annot.csv
+    - ../dataset/Hollywood2_Pixabay/data-vc-2023/final_annot.csv
+    - ../dataset/NTIRE/ntire_annot.csv
+    - ../dataset/REDS/reds_annot.csv
+
+  # ImageNet pairs 文件
+  imagenet_pairs_file: ../dataset/pairs.txt
+
+  # 資料載入參數
+  workers: 4  # RTX 5090 建議 4-8
+  image_size: [224, 224]
+
+# ============================================
+# 訓練超參數
+# ============================================
+training:
+  # 基本參數
+  batch_size: 4  # RTX 5090 可嘗試 6-8
+  accumulation_steps: 4  # 有效 batch size = batch_size * accumulation_steps
+  epoch: 40
+  lr: 3.0e-5
+  lr_step: 1
+
+  # 輸入通道數 (修改為 4 以匹配 FlowChroma)
+  ic: 4
+
+  # 檢查點
+  checkpoint_dir: checkpoints_rtx5090
+  checkpoint_step: 100
+  resume: false
+  resume_checkpoint_dir: ""
+
+  # 預訓練模型
+  pretrained_model: swinv2-cr-t-224
+  load_pretrained_model: false
+  pretrained_model_dir: ckpt
+
+  # 資料增強
+  real_reference_probability: 0.95
+  luminance_noise: 0.0
+  permute_data: false
+
+# ============================================
+# 損失函數權重
+# ============================================
+loss:
+  weight_l1: 1.0
+  weight_contextual: 0.015
+  weight_perceptual: 0.15
+  weight_smoothness: 150.0
+  weight_gan: 0.015
+  weight_nonlocal_smoothness: 0.0
+
+# ============================================
+# GAN 訓練
+# ============================================
+gan:
+  epoch_train_discriminator: 3
+
+# ============================================
+# 進階選項
+# ============================================
+advanced:
+  domain_invariant: false
+
+# ============================================
+# 監控與日誌
+# ============================================
+logging:
+  use_wandb: true
+  wandb_name: swintexco_rtx5090_baseline
+  wandb_token: ""  # 留空則使用已登入的 token
+
+# ============================================
+# RTX 5090 特定優化
+# ============================================
+optimization:
+  # cuDNN 自動調優
+  cudnn_benchmark: true
+
+  # 混合精度訓練 (FP16)
+  # 注意: 需要在代碼中實現
+  use_amp: false
+
+  # 梯度裁剪
+  gradient_clip: 1.0
+
+  # 資料預取
+  pin_memory: true
+  persistent_workers: true
+
+# ============================================
+# 配置變體
+# ============================================
+# 以下是針對不同場景的配置建議
+
+# 高性能配置 (最大化 GPU 使用)
+# training.batch_size: 8
+# training.accumulation_steps: 2
+# data.workers: 8
+
+# 穩定配置 (推薦起點)
+# training.batch_size: 4
+# training.accumulation_steps: 4
+# data.workers: 4
+
+# 記憶體受限配置
+# training.batch_size: 2
+# training.accumulation_steps: 8
+# data.image_size: [192, 192]
+# data.workers: 2
+
+# 快速測試配置
+# training.batch_size: 2
+# training.epoch: 5
+# training.checkpoint_step: 10
+# data.workers: 2

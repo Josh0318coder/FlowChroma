@@ -1,0 +1,23 @@
+# SwinTExCo Dependencies for RTX 5090 / Modern GPU Training
+
+# PyTorch with CUDA 12.1 support (適合新版 GPU)
+torch==2.1.1
+torchvision==0.16.1
+
+# Core dependencies
+einops==0.6.1
+pandas==2.0.2
+scikit-image==0.21.0
+timm==0.9.12
+tqdm==4.65.0
+wandb==0.15.4
+opencv-python==4.8.1.78
+numba==0.58.1
+
+# Optional: Gradio for web interface
+gradio==4.7.1
+
+# Additional utilities
+pillow>=9.0.0
+numpy>=1.23.0
+matplotlib>=3.5.0
