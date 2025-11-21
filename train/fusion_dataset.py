@@ -36,11 +36,19 @@ class FusionDataset(Dataset):
     def __init__(self, data_root, target_size=(224, 224), max_frames_per_video=None):
         """
         Args:
-            data_root: Root directory containing video folders
+            data_root: Root directory or comma-separated directories containing video folders
+                       Example: '/path1' or '/path1,/path2,/path3'
             target_size: (H, W) tuple for resizing
             max_frames_per_video: Maximum frames to use per video (None = all)
         """
-        self.data_root = data_root
+        # Support comma-separated multiple paths
+        if isinstance(data_root, str) and ',' in data_root:
+            self.data_roots = [path.strip() for path in data_root.split(',')]
+        elif isinstance(data_root, str):
+            self.data_roots = [data_root]
+        else:
+            self.data_roots = data_root if isinstance(data_root, list) else [data_root]
+
         self.target_size = target_size
         self.max_frames_per_video = max_frames_per_video
 
@@ -49,23 +57,31 @@ class FusionDataset(Dataset):
         self.samples = self._build_samples()
 
         print(f"FusionDataset initialized:")
+        print(f"  - {len(self.data_roots)} data root(s)")
+        for i, root in enumerate(self.data_roots, 1):
+            print(f"    [{i}] {root}")
         print(f"  - {len(self.videos)} videos")
         print(f"  - {len(self.samples)} frame pairs")
 
     def _scan_videos(self):
-        """Scan all video directories"""
+        """Scan all video directories from all data roots"""
         videos = []
-        for item in sorted(os.listdir(self.data_root)):
-            item_path = os.path.join(self.data_root, item)
-            if os.path.isdir(item_path):
-                # Get all image files
-                frames = self._get_frames(item_path)
-                if len(frames) >= 2:  # Need at least 2 frames
-                    videos.append({
-                        'name': item,
-                        'path': item_path,
-                        'frames': frames
-                    })
+        for data_root in self.data_roots:
+            if not os.path.exists(data_root):
+                print(f"⚠️  Warning: data_root does not exist: {data_root}")
+                continue
+
+            for item in sorted(os.listdir(data_root)):
+                item_path = os.path.join(data_root, item)
+                if os.path.isdir(item_path):
+                    # Get all image files
+                    frames = self._get_frames(item_path)
+                    if len(frames) >= 2:  # Need at least 2 frames
+                        videos.append({
+                            'name': item,
+                            'path': item_path,
+                            'frames': frames
+                        })
         return videos
 
     def _get_frames(self, video_path):

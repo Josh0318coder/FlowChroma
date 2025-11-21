@@ -168,7 +168,7 @@ def main():
     parser.add_argument('--swintexco_ckpt', type=str, required=True,
                         help='Path to SwinTExCo checkpoint directory')
     parser.add_argument('--data_root', type=str, required=True,
-                        help='Root directory of training videos')
+                        help='Root directory of training videos (comma-separated for multiple paths, e.g., /path1,/path2,/path3)')
 
     # Training
     parser.add_argument('--batch_size', type=int, default=1,
