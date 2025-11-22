@@ -124,7 +124,8 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
             'loss': loss_dict['total'],
             'l1': loss_dict['l1'],
             'perc': loss_dict.get('perceptual', 0),
-            'ctx': loss_dict.get('contextual', 0)
+            'ctx': loss_dict.get('contextual', 0),
+            'temp': loss_dict.get('temporal', 0)
         })
 
     # Average losses
