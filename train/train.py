@@ -123,6 +123,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
         pbar.set_postfix({
             'loss': loss_dict['total'],
             'l1': loss_dict['l1'],
+            'perc': loss_dict.get('perceptual', 0),
             'ctx': loss_dict.get('contextual', 0)
         })
 
