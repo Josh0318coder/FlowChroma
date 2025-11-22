@@ -234,7 +234,8 @@ class FusionSystem(nn.Module):
             This requires SwinTExCo to be modified to return similarity_map.
             See fusion/README.md for required modifications.
         """
-        with torch.no_grad():
+        # Disable autocast for SwinTExCo (not compatible with mixed precision)
+        with torch.no_grad(), autocast(enabled=False):
             # Process reference
             ref_lab = self.swintexco.processor(reference_pil).unsqueeze(0).to(self.device)
 
