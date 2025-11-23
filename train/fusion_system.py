@@ -31,10 +31,11 @@ class FusionSystem(nn.Module):
 
     Integrates three modules:
         1. MemFlow (frozen) - Temporal consistency via optical flow
-        2. SwinTExCo (frozen) - Semantic matching via exemplar
+        2. SwinTExCo (trainable) - Semantic matching via exemplar
         3. Fusion UNet (trainable) - Intelligent fusion
 
-    During training, only Fusion UNet parameters are updated.
+    During training, SwinTExCo and Fusion UNet are jointly optimized,
+    while MemFlow remains frozen.
     """
 
     def __init__(self,
@@ -132,7 +133,7 @@ class FusionSystem(nn.Module):
                              f"Make sure memflow_path points to MemFlow repository")
 
     def _load_swintexco(self, checkpoint_path):
-        """Load SwinTExCo model"""
+        """Load SwinTExCo model (trainable for joint training)"""
         try:
             from inference import SwinTExCo
 
@@ -141,8 +142,19 @@ class FusionSystem(nn.Module):
                 device=self.device
             )
 
-            # Keep model in fp32, will use autocast for mixed precision
-            # Already frozen in SwinTExCo.__init__
+            # Unfreeze for joint training
+            for param in model.embed_net.parameters():
+                param.requires_grad = True
+            for param in model.nonlocal_net.parameters():
+                param.requires_grad = True
+            for param in model.colornet.parameters():
+                param.requires_grad = True
+
+            # Set to train mode
+            model.embed_net.train()
+            model.nonlocal_net.train()
+            model.colornet.train()
+
             return model
 
         except Exception as e:
@@ -164,8 +176,8 @@ class FusionSystem(nn.Module):
             frame_t1: [B, 3, H, W] LAB tensor (normalized to [-1, 1])
 
         Returns:
-            memflow_ab: [B, 2, H, W]
-            memflow_conf: [B, 1, H, W]
+            memflow_lab: [B, 3, H, W] - Complete LAB prediction
+            memflow_conf: [B, 1, H, W] - Confidence map
         """
         self.curr_ti += 1
 
@@ -216,7 +228,11 @@ class FusionSystem(nn.Module):
             prev_ab = frame_t[:, 1:3, :, :]
             memflow_ab = warp_color_by_flow(prev_ab, flow_up)
 
-        return memflow_ab, confidence_map
+            # Combine with current frame L channel to form complete LAB
+            current_L = frame_t1[:, 0:1, :, :]
+            memflow_lab = torch.cat([current_L, memflow_ab], dim=1)
+
+        return memflow_lab, confidence_map
 
     def swintexco_inference(self, reference_pil, target_pil):
         """
@@ -234,7 +250,8 @@ class FusionSystem(nn.Module):
             This requires SwinTExCo to be modified to return similarity_map.
             See fusion/README.md for required modifications.
         """
-        with torch.no_grad():
+        # Disable autocast for SwinTExCo (not compatible with mixed precision)
+        with torch.no_grad(), autocast(enabled=False):
             # Process reference
             ref_lab = self.swintexco.processor(reference_pil).unsqueeze(0).to(self.device)
 
@@ -277,37 +294,79 @@ class FusionSystem(nn.Module):
             target_pil: PIL Image (RGB)
 
         Returns:
-            fused_ab: [B, 2, H, W]
+            fused_lab: [B, 3, H, W] - Complete LAB prediction
         """
-        # 1. MemFlow inference (frozen)
-        memflow_ab, memflow_conf = self.memflow_inference(frame_t, frame_t1)
-
-        # 2. SwinTExCo inference (frozen)
-        swintexco_ab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
-
-        # 3. Extract L channel
+        # Extract L channel
+        B, _, H, W = frame_t1.shape
         L_channel = frame_t1[:, 0:1, :, :]
 
-        # 4. Fusion UNet inference (trainable)
-        fused_ab = self.fusion_unet(
-            memflow_ab,
-            swintexco_ab,
+        # 1. MemFlow inference (frozen)
+        if self.curr_ti == -1:
+            # First frame: use zero placeholder (entire branch invalid)
+            memflow_lab = torch.zeros(B, 3, H, W, device=self.device)
+            memflow_conf = torch.zeros(B, 1, H, W, device=self.device)
+        else:
+            # Subsequent frames: normal inference
+            memflow_lab, memflow_conf = self.memflow_inference(frame_t, frame_t1)
+
+        # 2. SwinTExCo inference (always valid)
+        swintexco_ab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
+
+        # 3. Fusion UNet inference (trainable)
+        fused_lab = self.fusion_unet(
+            memflow_lab,
             memflow_conf,
+            swintexco_ab,
             swintexco_sim,
             L_channel
         )
 
-        return fused_ab
+        return fused_lab
 
     def train(self, mode=True):
-        """Override train to only affect Fusion UNet"""
+        """Override train to affect SwinTExCo and Fusion UNet"""
         if mode:
+            # Train mode: SwinTExCo and FusionNet
+            self.swintexco.embed_net.train()
+            self.swintexco.nonlocal_net.train()
+            self.swintexco.colornet.train()
             self.fusion_unet.train()
         else:
+            # Eval mode
+            self.swintexco.embed_net.eval()
+            self.swintexco.nonlocal_net.eval()
+            self.swintexco.colornet.eval()
             self.fusion_unet.eval()
-        # MemFlow and SwinTExCo always stay in eval mode
+        # MemFlow always stays in eval mode
         return self
 
     def parameters(self, recurse=True):
-        """Override to only return Fusion UNet parameters"""
-        return self.fusion_unet.parameters(recurse=recurse)
+        """Override to return SwinTExCo and Fusion UNet parameters"""
+        import itertools
+        return itertools.chain(
+            self.swintexco.embed_net.parameters(recurse=recurse),
+            self.swintexco.nonlocal_net.parameters(recurse=recurse),
+            self.swintexco.colornet.parameters(recurse=recurse),
+            self.fusion_unet.parameters(recurse=recurse)
+        )
+
+    def get_parameter_groups(self):
+        """
+        Get parameter groups for different learning rates
+
+        Returns:
+            list: [{'params': swintexco_params, 'name': 'swintexco'},
+                   {'params': fusion_params, 'name': 'fusion'}]
+        """
+        import itertools
+        swintexco_params = list(itertools.chain(
+            self.swintexco.embed_net.parameters(),
+            self.swintexco.nonlocal_net.parameters(),
+            self.swintexco.colornet.parameters()
+        ))
+        fusion_params = list(self.fusion_unet.parameters())
+
+        return [
+            {'params': swintexco_params, 'name': 'swintexco'},
+            {'params': fusion_params, 'name': 'fusion'}
+        ]

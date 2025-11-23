@@ -32,6 +32,25 @@ from train.fusion_loss import FusionLoss
 from train.fusion_dataset import FusionDataset
 
 
+def fusion_collate_fn(batch):
+    """
+    Custom collate function to handle PIL Images in batch
+
+    Args:
+        batch: list of tuples (frame_t_lab, frame_t1_lab, reference_pil, target_pil, gt_ab)
+
+    Returns:
+        Batched tensors and lists of PIL images
+    """
+    frame_t_batch = torch.stack([item[0] for item in batch])
+    frame_t1_batch = torch.stack([item[1] for item in batch])
+    reference_pil_list = [item[2] for item in batch]  # Keep as list
+    target_pil_list = [item[3] for item in batch]     # Keep as list
+    gt_ab_batch = torch.stack([item[4] for item in batch])
+
+    return frame_t_batch, frame_t1_batch, reference_pil_list, target_pil_list, gt_ab_batch
+
+
 def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
     """Train for one epoch"""
 
@@ -104,7 +123,9 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
         pbar.set_postfix({
             'loss': loss_dict['total'],
             'l1': loss_dict['l1'],
-            'ctx': loss_dict.get('contextual', 0)
+            'perc': loss_dict.get('perceptual', 0),
+            'ctx': loss_dict.get('contextual', 0),
+            'temp': loss_dict.get('temporal', 0)
         })
 
     # Average losses
@@ -168,7 +189,7 @@ def main():
     parser.add_argument('--swintexco_ckpt', type=str, required=True,
                         help='Path to SwinTExCo checkpoint directory')
     parser.add_argument('--data_root', type=str, required=True,
-                        help='Root directory of training videos')
+                        help='Root directory of training videos (comma-separated for multiple paths, e.g., /path1,/path2,/path3)')
 
     # Training
     parser.add_argument('--batch_size', type=int, default=1,
@@ -254,7 +275,8 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=4,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=fusion_collate_fn
     )
 
     # Mixed precision scaler

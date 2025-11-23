@@ -25,16 +25,16 @@ from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import PlaceholderFusion
 
 
-def create_dummy_data(size=(224, 224), dtype=torch.float16):
+def create_dummy_data(size=(224, 224)):
     """Create dummy data for testing"""
     # Create dummy frames as PIL Images
     dummy_rgb = np.random.randint(0, 255, (*size, 3), dtype=np.uint8)
     reference_pil = Image.fromarray(dummy_rgb)
     target_pil = Image.fromarray(dummy_rgb)
 
-    # Create dummy LAB tensors (fp16 for FlashAttention compatibility)
-    frame_t = torch.randn(1, 3, *size, dtype=dtype)
-    frame_t1 = torch.randn(1, 3, *size, dtype=dtype)
+    # Create dummy LAB tensors
+    frame_t = torch.randn(1, 3, *size)
+    frame_t1 = torch.randn(1, 3, *size)
 
     return frame_t, frame_t1, reference_pil, target_pil
 
