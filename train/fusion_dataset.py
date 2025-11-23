@@ -391,10 +391,11 @@ class FusionSequenceDataset(Dataset):
     def _load_frame(self, video_name, frame_name, source_path=None):
         """
         Load a single frame as PIL Image (flexible path search)
+        Based on SwinTExCo's approach with flexible video folder matching
 
         Args:
-            video_name: Video folder name
-            frame_name: Frame filename
+            video_name: Video folder name (from CSV)
+            frame_name: Frame filename (from CSV)
             source_path: Preferred source path (from annotation)
 
         Returns:
@@ -410,12 +411,26 @@ class FusionSequenceDataset(Dataset):
             if not base_path:
                 continue
 
-            # Try multiple path patterns
+            # Try multiple path patterns (based on SwinTExCo's approach)
             patterns = [
-                os.path.join(base_path, video_name, frame_name),  # path/video/frame.png
-                os.path.join(base_path, frame_name),              # path/frame.png (flat structure)
-                os.path.join(base_path, video_name, f"*{frame_name}*"),  # flexible name matching
+                # Standard: video_data_root/video_name/frame_name
+                os.path.join(base_path, video_name, frame_name),
+
+                # Flexible video folder matching (e.g., CSV has "1" but folder is "001")
+                os.path.join(base_path, f"*{video_name}", frame_name),
+                os.path.join(base_path, f"*{video_name}*", frame_name),
             ]
+
+            # Add zero-padded versions if video_name is numeric
+            if video_name.isdigit():
+                num = int(video_name)
+                patterns.extend([
+                    os.path.join(base_path, f"{num:03d}", frame_name),  # 001, 002, etc.
+                    os.path.join(base_path, f"{num:04d}", frame_name),  # 0001, 0002, etc.
+                ])
+
+            # Also try flat structure
+            patterns.append(os.path.join(base_path, frame_name))
 
             for pattern in patterns:
                 # Direct path check
@@ -426,13 +441,15 @@ class FusionSequenceDataset(Dataset):
                 if '*' in pattern:
                     matches = glob.glob(pattern)
                     if matches:
+                        # Sort to get consistent results
+                        matches.sort()
                         return Image.open(matches[0]).convert('RGB')
 
         # If not found, raise error with helpful message
         raise FileNotFoundError(
             f"Frame not found: {video_name}/{frame_name}\n"
             f"Searched in paths: {self.davis_roots}\n"
-            f"Hint: Check if video folders or frame files exist in the dataset path"
+            f"Hint: Check if video folders exist in the dataset path"
         )
 
     def _select_reference(self, ref_list):
