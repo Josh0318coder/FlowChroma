@@ -255,3 +255,198 @@ class VideoSequenceDataset(Dataset):
         lab_np[:, :, 2] = lab_np[:, :, 2] / 127.0
         lab_tensor = torch.from_numpy(lab_np).permute(2, 0, 1).float()
         return lab_tensor
+
+
+class FusionSequenceDataset(Dataset):
+    """
+    Sequential dataset for FlowChroma fusion training with ImageNet references
+
+    Loads sequences of frames (default 4 frames) for sequential training,
+    enabling MemFlow's memory mechanism and using ImageNet semantic references.
+
+    Args:
+        davis_root: Path to DAVIS video frames (e.g., '/data/DAVIS/')
+        imagenet_root: Path to ImageNet images (e.g., '/data/ImageNet/')
+        annot_csv: Path to davis_annot.csv
+        sequence_length: Number of frames per sequence (default 4)
+        real_reference_probability: Probability of using ImageNet reference (default 1.0)
+        target_size: (H, W) tuple for resizing
+    """
+
+    def __init__(
+        self,
+        davis_root,
+        imagenet_root,
+        annot_csv,
+        sequence_length=4,
+        real_reference_probability=1.0,
+        target_size=(224, 224)
+    ):
+        import pandas as pd
+
+        self.davis_root = davis_root
+        self.imagenet_root = imagenet_root
+        self.sequence_length = sequence_length
+        self.real_reference_probability = real_reference_probability
+        self.target_size = target_size
+
+        # Load annotations
+        self.annotations = pd.read_csv(annot_csv)
+        print(f"Loaded {len(self.annotations)} frame pairs from {annot_csv}")
+
+        # Group by video to create sequences
+        self.sequences = self._build_sequences()
+        print(f"Created {len(self.sequences)} sequences of length {sequence_length}")
+
+    def _build_sequences(self):
+        """
+        Build sequences from frame pairs
+
+        Returns:
+            List of sequences, where each sequence is a list of annotation indices
+        """
+        sequences = []
+
+        # Group annotations by video
+        video_groups = self.annotations.groupby('video_name')
+
+        for video_name, group in video_groups:
+            # Sort by frame number (assuming frame names are sequential)
+            group_sorted = group.sort_values('current_frame')
+            indices = group_sorted.index.tolist()
+
+            # Create sliding window sequences
+            for i in range(len(indices) - self.sequence_length + 1):
+                sequence_indices = indices[i:i + self.sequence_length]
+                sequences.append({
+                    'video_name': video_name,
+                    'indices': sequence_indices,
+                    'start_frame': i
+                })
+
+        return sequences
+
+    def __len__(self):
+        return len(self.sequences)
+
+    def _load_frame(self, video_name, frame_name):
+        """Load a single frame as PIL Image"""
+        frame_path = os.path.join(self.davis_root, video_name, frame_name)
+        return Image.open(frame_path).convert('RGB')
+
+    def _select_reference(self, ref_list):
+        """
+        Select one reference from the list of 5 candidates
+
+        Args:
+            ref_list: List of 5 ImageNet reference paths
+
+        Returns:
+            PIL Image of selected reference
+        """
+        import random
+
+        # Randomly select one from the 5 candidates
+        ref_path = random.choice(ref_list)
+        ref_full_path = os.path.join(self.imagenet_root, ref_path)
+
+        try:
+            ref_image = Image.open(ref_full_path).convert('RGB')
+        except Exception as e:
+            print(f"Warning: Failed to load reference {ref_full_path}: {e}")
+            # Fallback: return a blank reference
+            ref_image = Image.new('RGB', (256, 256), color='gray')
+
+        return ref_image
+
+    def _rgb_to_lab_tensor(self, pil_image):
+        """Convert PIL RGB image to LAB tensor (same as FusionDataset)"""
+        rgb_np = np.array(pil_image, dtype=np.uint8)
+        lab_np = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        lab_np[:, :, 0] = lab_np[:, :, 0] * 100.0 / 255.0
+        lab_np[:, :, 1] = lab_np[:, :, 1] - 128.0
+        lab_np[:, :, 2] = lab_np[:, :, 2] - 128.0
+        lab_np[:, :, 0] = (lab_np[:, :, 0] / 50.0) - 1.0
+        lab_np[:, :, 1] = lab_np[:, :, 1] / 127.0
+        lab_np[:, :, 2] = lab_np[:, :, 2] / 127.0
+        lab_tensor = torch.from_numpy(lab_np).permute(2, 0, 1).float()
+        return lab_tensor
+
+    def __getitem__(self, idx):
+        """
+        Get a sequence of frames with references
+
+        Returns:
+            Dictionary containing:
+                - frames_lab: List of [3, H, W] LAB tensors (sequence_length frames)
+                - frames_pil: List of PIL Images (for SwinTExCo, sequence_length frames)
+                - references_pil: List of PIL Images (sequence_length references)
+                - video_name: str
+        """
+        sequence_info = self.sequences[idx]
+        video_name = sequence_info['video_name']
+        indices = sequence_info['indices']
+
+        frames_lab = []
+        frames_pil = []
+        references_pil = []
+
+        for idx in indices:
+            row = self.annotations.iloc[idx]
+
+            # Load current frame
+            frame_pil = self._load_frame(video_name, row['current_frame'])
+            frame_pil_resized = frame_pil.resize(self.target_size[::-1], Image.LANCZOS)
+
+            # Convert to LAB
+            frame_lab = self._rgb_to_lab_tensor(frame_pil_resized)
+
+            frames_pil.append(frame_pil_resized)
+            frames_lab.append(frame_lab)
+
+            # Select reference image
+            ref_list = [row['ref1'], row['ref2'], row['ref3'], row['ref4'], row['ref5']]
+
+            if np.random.random() < self.real_reference_probability:
+                # Use ImageNet external reference
+                reference = self._select_reference(ref_list)
+            else:
+                # Use video first frame
+                first_frame_name = self.annotations[
+                    self.annotations['video_name'] == video_name
+                ].iloc[0]['current_frame']
+                reference = self._load_frame(video_name, first_frame_name)
+
+            reference_resized = reference.resize(self.target_size[::-1], Image.LANCZOS)
+            references_pil.append(reference_resized)
+
+        return {
+            'frames_lab': frames_lab,  # List of LAB tensors
+            'frames_pil': frames_pil,  # List of PIL Images
+            'references_pil': references_pil,  # List of PIL Images
+            'video_name': video_name
+        }
+
+
+def fusion_sequence_collate_fn(batch):
+    """
+    Custom collate function for FusionSequenceDataset
+
+    Keeps the batch structure organized for easy sequence iteration.
+
+    Args:
+        batch: List of dictionaries from __getitem__
+
+    Returns:
+        Dictionary containing:
+            - frames_lab: List[List[Tensor]] - batch_size x sequence_length
+            - frames_pil: List[List[PIL.Image]] - batch_size x sequence_length
+            - references_pil: List[List[PIL.Image]] - batch_size x sequence_length
+            - video_names: List[str]
+    """
+    return {
+        'frames_lab': [item['frames_lab'] for item in batch],
+        'frames_pil': [item['frames_pil'] for item in batch],
+        'references_pil': [item['references_pil'] for item in batch],
+        'video_names': [item['video_name'] for item in batch]
+    }
