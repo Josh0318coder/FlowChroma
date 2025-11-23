@@ -26,23 +26,23 @@ def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv
     print("Testing FusionSequenceDataset")
     print("="*60)
 
-    # Check annotation file
-    if not os.path.exists(annot_csv):
-        print(f"\n❌ Error: Annotation file not found: {annot_csv}")
-        print("Please make sure davis_annot.csv is in the current directory")
-        return False
-
     # Prompt for paths if not provided
     if davis_root is None:
-        davis_root = input("\nEnter DAVIS root path (e.g., /data/DAVIS/): ").strip()
+        print("\nEnter DAVIS path(s):")
+        print("  - Single path: /data/DAVIS")
+        print("  - Multiple paths (comma-separated, no spaces): /data/DAVIS1,/data/DAVIS2")
+        davis_root = input("DAVIS root: ").strip()
 
     if imagenet_root is None:
-        imagenet_root = input("Enter ImageNet root path (e.g., /data/ImageNet/): ").strip()
+        print("\nEnter ImageNet path(s):")
+        print("  - Single path: /data/ImageNet")
+        print("  - Multiple paths (comma-separated, no spaces): /data/ImageNet1,/data/ImageNet2")
+        imagenet_root = input("ImageNet root: ").strip()
 
     print(f"\nDataset configuration:")
     print(f"  DAVIS root: {davis_root}")
     print(f"  ImageNet root: {imagenet_root}")
-    print(f"  Annotation CSV: {annot_csv}")
+    print(f"  CSV filename: {annot_csv} (will be searched in each DAVIS path)")
 
     # Create dataset
     print("\n" + "="*60)
@@ -184,11 +184,30 @@ def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv
 
 if __name__ == "__main__":
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Test FusionSequenceDataset')
-    parser.add_argument('--davis', type=str, help='Path to DAVIS root directory')
-    parser.add_argument('--imagenet', type=str, help='Path to ImageNet root directory')
+    parser = argparse.ArgumentParser(
+        description='Test FusionSequenceDataset with multi-path support',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Single path
+  python test_dataset.py --davis /data/DAVIS --imagenet /data/ImageNet
+
+  # Multiple paths (comma-separated, no spaces)
+  python test_dataset.py \\
+    --davis /data/DAVIS1,/data/DAVIS2 \\
+    --imagenet /data/ImageNet1,/data/ImageNet2
+
+Note:
+  - davis_annot.csv should be in each DAVIS path
+  - Supports comma-separated multiple paths (no spaces)
+        """
+    )
+    parser.add_argument('--davis', type=str,
+                       help='DAVIS path(s): single or comma-separated (e.g., /path1,/path2)')
+    parser.add_argument('--imagenet', type=str,
+                       help='ImageNet path(s): single or comma-separated (e.g., /path1,/path2)')
     parser.add_argument('--annot', type=str, default='davis_annot.csv',
-                       help='Path to annotation CSV file (default: davis_annot.csv)')
+                       help='CSV filename to search in each DAVIS path (default: davis_annot.csv)')
 
     args = parser.parse_args()
 

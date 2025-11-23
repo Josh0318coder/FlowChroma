@@ -265,9 +265,15 @@ class FusionSequenceDataset(Dataset):
     enabling MemFlow's memory mechanism and using ImageNet semantic references.
 
     Args:
-        davis_root: Path to DAVIS video frames (e.g., '/data/DAVIS/')
-        imagenet_root: Path to ImageNet images (e.g., '/data/ImageNet/')
-        annot_csv: Path to davis_annot.csv
+        davis_root: Path(s) to DAVIS video frames
+                   - Single path: '/data/DAVIS/'
+                   - Multiple paths (comma-separated): '/data/DAVIS1,/data/DAVIS2'
+                   - CSV file (davis_annot.csv) should be in each path
+        imagenet_root: Path(s) to ImageNet images
+                      - Single path: '/data/ImageNet/'
+                      - Multiple paths (comma-separated): '/data/ImageNet1,/data/ImageNet2'
+        annot_csv: Name of annotation CSV file (default: 'davis_annot.csv')
+                   Will be searched in each davis_root directory
         sequence_length: Number of frames per sequence (default 4)
         real_reference_probability: Probability of using ImageNet reference (default 1.0)
         target_size: (H, W) tuple for resizing
@@ -277,26 +283,79 @@ class FusionSequenceDataset(Dataset):
         self,
         davis_root,
         imagenet_root,
-        annot_csv,
+        annot_csv='davis_annot.csv',
         sequence_length=4,
         real_reference_probability=1.0,
         target_size=(224, 224)
     ):
         import pandas as pd
 
-        self.davis_root = davis_root
-        self.imagenet_root = imagenet_root
+        # Parse multiple paths
+        self.davis_roots = self._parse_paths(davis_root)
+        self.imagenet_roots = self._parse_paths(imagenet_root)
         self.sequence_length = sequence_length
         self.real_reference_probability = real_reference_probability
         self.target_size = target_size
 
-        # Load annotations
-        self.annotations = pd.read_csv(annot_csv)
-        print(f"Loaded {len(self.annotations)} frame pairs from {annot_csv}")
+        print(f"DAVIS paths: {self.davis_roots}")
+        print(f"ImageNet paths: {self.imagenet_roots}")
+
+        # Load annotations from all paths
+        self.annotations = self._load_annotations(annot_csv)
+        print(f"Loaded {len(self.annotations)} total frame pairs")
 
         # Group by video to create sequences
         self.sequences = self._build_sequences()
         print(f"Created {len(self.sequences)} sequences of length {sequence_length}")
+
+    def _parse_paths(self, path_str):
+        """
+        Parse path string into list of paths
+
+        Args:
+            path_str: Single path or comma-separated paths (no spaces)
+
+        Returns:
+            List of paths
+        """
+        if isinstance(path_str, list):
+            return path_str
+        elif ',' in path_str:
+            return [p.strip() for p in path_str.split(',')]
+        else:
+            return [path_str]
+
+    def _load_annotations(self, annot_csv):
+        """
+        Load annotations from all DAVIS paths
+
+        Args:
+            annot_csv: Name of CSV file to search in each path
+
+        Returns:
+            Combined DataFrame
+        """
+        import pandas as pd
+
+        all_annotations = []
+
+        for davis_path in self.davis_roots:
+            csv_path = os.path.join(davis_path, annot_csv)
+
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                # Add source path column to help locate files later
+                df['_source_path'] = davis_path
+                all_annotations.append(df)
+                print(f"  Loaded {len(df)} pairs from {csv_path}")
+            else:
+                print(f"  Warning: CSV not found at {csv_path}")
+
+        if not all_annotations:
+            raise FileNotFoundError(f"No CSV files found in any DAVIS path: {self.davis_roots}")
+
+        # Combine all annotations
+        return pd.concat(all_annotations, ignore_index=True)
 
     def _build_sequences(self):
         """
@@ -329,10 +388,32 @@ class FusionSequenceDataset(Dataset):
     def __len__(self):
         return len(self.sequences)
 
-    def _load_frame(self, video_name, frame_name):
-        """Load a single frame as PIL Image"""
-        frame_path = os.path.join(self.davis_root, video_name, frame_name)
-        return Image.open(frame_path).convert('RGB')
+    def _load_frame(self, video_name, frame_name, source_path=None):
+        """
+        Load a single frame as PIL Image
+
+        Args:
+            video_name: Video folder name
+            frame_name: Frame filename
+            source_path: Preferred source path (from annotation)
+
+        Returns:
+            PIL Image
+        """
+        # Try source path first if provided
+        if source_path:
+            frame_path = os.path.join(source_path, video_name, frame_name)
+            if os.path.exists(frame_path):
+                return Image.open(frame_path).convert('RGB')
+
+        # Search in all DAVIS paths
+        for davis_path in self.davis_roots:
+            frame_path = os.path.join(davis_path, video_name, frame_name)
+            if os.path.exists(frame_path):
+                return Image.open(frame_path).convert('RGB')
+
+        # If not found, raise error
+        raise FileNotFoundError(f"Frame not found: {video_name}/{frame_name} in paths {self.davis_roots}")
 
     def _select_reference(self, ref_list):
         """
@@ -348,16 +429,20 @@ class FusionSequenceDataset(Dataset):
 
         # Randomly select one from the 5 candidates
         ref_path = random.choice(ref_list)
-        ref_full_path = os.path.join(self.imagenet_root, ref_path)
 
-        try:
-            ref_image = Image.open(ref_full_path).convert('RGB')
-        except Exception as e:
-            print(f"Warning: Failed to load reference {ref_full_path}: {e}")
-            # Fallback: return a blank reference
-            ref_image = Image.new('RGB', (256, 256), color='gray')
+        # Search in all ImageNet paths
+        for imagenet_path in self.imagenet_roots:
+            ref_full_path = os.path.join(imagenet_path, ref_path)
+            if os.path.exists(ref_full_path):
+                try:
+                    return Image.open(ref_full_path).convert('RGB')
+                except Exception as e:
+                    print(f"Warning: Failed to load reference {ref_full_path}: {e}")
+                    continue
 
-        return ref_image
+        # Fallback: return a blank reference
+        print(f"Warning: Reference not found in any path: {ref_path}")
+        return Image.new('RGB', (256, 256), color='gray')
 
     def _rgb_to_lab_tensor(self, pil_image):
         """Convert PIL RGB image to LAB tensor (same as FusionDataset)"""
@@ -393,9 +478,10 @@ class FusionSequenceDataset(Dataset):
 
         for idx in indices:
             row = self.annotations.iloc[idx]
+            source_path = row.get('_source_path', None)
 
             # Load current frame
-            frame_pil = self._load_frame(video_name, row['current_frame'])
+            frame_pil = self._load_frame(video_name, row['current_frame'], source_path)
             frame_pil_resized = frame_pil.resize(self.target_size[::-1], Image.LANCZOS)
 
             # Convert to LAB
@@ -415,7 +501,7 @@ class FusionSequenceDataset(Dataset):
                 first_frame_name = self.annotations[
                     self.annotations['video_name'] == video_name
                 ].iloc[0]['current_frame']
-                reference = self._load_frame(video_name, first_frame_name)
+                reference = self._load_frame(video_name, first_frame_name, source_path)
 
             reference_resized = reference.resize(self.target_size[::-1], Image.LANCZOS)
             references_pil.append(reference_resized)
