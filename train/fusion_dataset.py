@@ -268,12 +268,10 @@ class FusionSequenceDataset(Dataset):
         davis_root: Path(s) to DAVIS video frames
                    - Single path: '/data/DAVIS/'
                    - Multiple paths (comma-separated): '/data/DAVIS1,/data/DAVIS2'
-                   - CSV file (davis_annot.csv) should be in each path
+                   - CSV file will be auto-detected in each path (first .csv file found)
         imagenet_root: Path(s) to ImageNet images
                       - Single path: '/data/ImageNet/'
                       - Multiple paths (comma-separated): '/data/ImageNet1,/data/ImageNet2'
-        annot_csv: Name of annotation CSV file (default: 'davis_annot.csv')
-                   Will be searched in each davis_root directory
         sequence_length: Number of frames per sequence (default 4)
         real_reference_probability: Probability of using ImageNet reference (default 1.0)
         target_size: (H, W) tuple for resizing
@@ -283,7 +281,6 @@ class FusionSequenceDataset(Dataset):
         self,
         davis_root,
         imagenet_root,
-        annot_csv='davis_annot.csv',
         sequence_length=4,
         real_reference_probability=1.0,
         target_size=(224, 224)
@@ -297,11 +294,11 @@ class FusionSequenceDataset(Dataset):
         self.real_reference_probability = real_reference_probability
         self.target_size = target_size
 
-        print(f"DAVIS paths: {self.davis_roots}")
+        print(f"Dataset paths: {self.davis_roots}")
         print(f"ImageNet paths: {self.imagenet_roots}")
 
-        # Load annotations from all paths
-        self.annotations = self._load_annotations(annot_csv)
+        # Load annotations from all paths (auto-detect CSV files)
+        self.annotations = self._load_annotations()
         print(f"Loaded {len(self.annotations)} total frame pairs")
 
         # Group by video to create sequences
@@ -325,34 +322,37 @@ class FusionSequenceDataset(Dataset):
         else:
             return [path_str]
 
-    def _load_annotations(self, annot_csv):
+    def _load_annotations(self):
         """
-        Load annotations from all DAVIS paths
+        Load annotations from all dataset paths (auto-detect CSV files)
 
-        Args:
-            annot_csv: Name of CSV file to search in each path
+        Searches for the first .csv file in each path and loads it.
 
         Returns:
             Combined DataFrame
         """
         import pandas as pd
+        import glob
 
         all_annotations = []
 
         for davis_path in self.davis_roots:
-            csv_path = os.path.join(davis_path, annot_csv)
+            # Find all CSV files in the path
+            csv_files = glob.glob(os.path.join(davis_path, '*.csv'))
 
-            if os.path.exists(csv_path):
+            if csv_files:
+                # Use the first CSV file found
+                csv_path = csv_files[0]
                 df = pd.read_csv(csv_path)
                 # Add source path column to help locate files later
                 df['_source_path'] = davis_path
                 all_annotations.append(df)
                 print(f"  Loaded {len(df)} pairs from {csv_path}")
             else:
-                print(f"  Warning: CSV not found at {csv_path}")
+                print(f"  Warning: No CSV file found in {davis_path}")
 
         if not all_annotations:
-            raise FileNotFoundError(f"No CSV files found in any DAVIS path: {self.davis_roots}")
+            raise FileNotFoundError(f"No CSV files found in any dataset path: {self.davis_roots}")
 
         # Combine all annotations
         return pd.concat(all_annotations, ignore_index=True)

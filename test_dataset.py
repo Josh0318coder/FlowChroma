@@ -2,7 +2,7 @@
 Test FusionSequenceDataset to verify data loading
 
 Usage:
-    python test_dataset.py --davis /path/to/DAVIS --imagenet /path/to/ImageNet
+    python test_dataset.py --dataset /path/to/DAVIS --imagenet /path/to/ImageNet
 
     Or simply:
     python test_dataset.py  (will use current directory and prompt for paths)
@@ -19,7 +19,7 @@ from train.fusion_dataset import FusionSequenceDataset, fusion_sequence_collate_
 from torch.utils.data import DataLoader
 
 
-def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv'):
+def test_dataset(dataset_root=None, imagenet_root=None):
     """Test FusionSequenceDataset loading"""
 
     print("="*60)
@@ -27,11 +27,12 @@ def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv
     print("="*60)
 
     # Prompt for paths if not provided
-    if davis_root is None:
-        print("\nEnter DAVIS path(s):")
+    if dataset_root is None:
+        print("\nEnter Dataset path(s):")
         print("  - Single path: /data/DAVIS")
         print("  - Multiple paths (comma-separated, no spaces): /data/DAVIS1,/data/DAVIS2")
-        davis_root = input("DAVIS root: ").strip()
+        print("  - CSV file will be auto-detected (first .csv file in each path)")
+        dataset_root = input("Dataset root: ").strip()
 
     if imagenet_root is None:
         print("\nEnter ImageNet path(s):")
@@ -40,9 +41,9 @@ def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv
         imagenet_root = input("ImageNet root: ").strip()
 
     print(f"\nDataset configuration:")
-    print(f"  DAVIS root: {davis_root}")
+    print(f"  Dataset root: {dataset_root}")
     print(f"  ImageNet root: {imagenet_root}")
-    print(f"  CSV filename: {annot_csv} (will be searched in each DAVIS path)")
+    print(f"  CSV files will be auto-detected in each dataset path")
 
     # Create dataset
     print("\n" + "="*60)
@@ -51,9 +52,8 @@ def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv
 
     try:
         dataset = FusionSequenceDataset(
-            davis_root=davis_root,
+            davis_root=dataset_root,
             imagenet_root=imagenet_root,
-            annot_csv=annot_csv,
             sequence_length=4,
             real_reference_probability=1.0,  # 100% ImageNet references
             target_size=(224, 224)
@@ -61,7 +61,7 @@ def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")
         print("\nPlease check the paths:")
-        print("  - davis_root: path to DAVIS video frames")
+        print("  - dataset_root: path to video frames (with .csv file)")
         print("  - imagenet_root: path to ImageNet images")
         import traceback
         traceback.print_exc()
@@ -185,37 +185,34 @@ def test_dataset(davis_root=None, imagenet_root=None, annot_csv='davis_annot.csv
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='Test FusionSequenceDataset with multi-path support',
+        description='Test FusionSequenceDataset with multi-path support and auto CSV detection',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Single path
-  python test_dataset.py --davis /data/DAVIS --imagenet /data/ImageNet
+  python test_dataset.py --dataset /data/DAVIS --imagenet /data/ImageNet
 
   # Multiple paths (comma-separated, no spaces)
   python test_dataset.py \\
-    --davis /data/DAVIS1,/data/DAVIS2 \\
+    --dataset /data/DAVIS1,/data/DAVIS2 \\
     --imagenet /data/ImageNet1,/data/ImageNet2
 
 Note:
-  - davis_annot.csv should be in each DAVIS path
+  - CSV file will be auto-detected (first .csv file in each dataset path)
   - Supports comma-separated multiple paths (no spaces)
         """
     )
-    parser.add_argument('--davis', type=str,
-                       help='DAVIS path(s): single or comma-separated (e.g., /path1,/path2)')
+    parser.add_argument('--dataset', type=str,
+                       help='Dataset path(s): single or comma-separated (e.g., /path1,/path2)')
     parser.add_argument('--imagenet', type=str,
                        help='ImageNet path(s): single or comma-separated (e.g., /path1,/path2)')
-    parser.add_argument('--annot', type=str, default='davis_annot.csv',
-                       help='CSV filename to search in each DAVIS path (default: davis_annot.csv)')
 
     args = parser.parse_args()
 
     # Run test
     success = test_dataset(
-        davis_root=args.davis,
-        imagenet_root=args.imagenet,
-        annot_csv=args.annot
+        dataset_root=args.dataset,
+        imagenet_root=args.imagenet
     )
 
     sys.exit(0 if success else 1)
