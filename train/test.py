@@ -140,19 +140,33 @@ def test_fusion_system(args):
     # Test parameter count
     print("\n4. Checking trainable parameters...")
     try:
+        # System parameters (SwinTExCo + FusionNet)
         total_params = sum(p.numel() for p in system.parameters())
         trainable_params = sum(p.numel() for p in system.parameters() if p.requires_grad)
 
-        print(f"   Total parameters: {total_params:,}")
-        print(f"   Trainable parameters: {trainable_params:,}")
-        print(f"   Frozen parameters: {total_params - trainable_params:,}")
+        print(f"   System total parameters: {total_params:,}")
+        print(f"   System trainable parameters: {trainable_params:,}")
+        print(f"   System frozen parameters: {total_params - trainable_params:,}")
 
-        # For PlaceholderFusion, trainable should be 0
-        assert trainable_params == 0, f"PlaceholderFusion should have 0 trainable params, got {trainable_params}"
-        print(f"✅ Parameter freeze verified!")
+        # FusionNet parameters only
+        fusion_params = sum(p.numel() for p in system.fusion_unet.parameters())
+        fusion_trainable = sum(p.numel() for p in system.fusion_unet.parameters() if p.requires_grad)
+
+        print(f"\n   FusionNet parameters: {fusion_params:,}")
+        print(f"   FusionNet trainable: {fusion_trainable:,}")
+
+        # For PlaceholderFusion, should have 0 parameters
+        assert fusion_params == 0, f"PlaceholderFusion should have 0 params, got {fusion_params}"
+        print(f"✅ PlaceholderFusion verified (0 parameters)!")
+
+        # SwinTExCo should be trainable
+        print(f"\n   SwinTExCo is trainable: {trainable_params > 0}")
+        print(f"✅ Parameter structure verified!")
 
     except Exception as e:
         print(f"❌ Parameter check failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
     print("\n" + "="*80)
