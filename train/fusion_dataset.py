@@ -469,7 +469,7 @@ class FusionSequenceDataset(Dataset):
                 - video_name: str
         """
         sequence_info = self.sequences[idx]
-        video_name = sequence_info['video_name']
+        video_name = str(sequence_info['video_name'])
         indices = sequence_info['indices']
 
         frames_lab = []
@@ -480,8 +480,8 @@ class FusionSequenceDataset(Dataset):
             row = self.annotations.iloc[idx]
             source_path = row.get('_source_path', None)
 
-            # Load current frame
-            frame_pil = self._load_frame(video_name, row['current_frame'], source_path)
+            # Load current frame (ensure frame_name is string)
+            frame_pil = self._load_frame(video_name, str(row['current_frame']), source_path)
             frame_pil_resized = frame_pil.resize(self.target_size[::-1], Image.LANCZOS)
 
             # Convert to LAB
@@ -491,7 +491,7 @@ class FusionSequenceDataset(Dataset):
             frames_lab.append(frame_lab)
 
             # Select reference image
-            ref_list = [row['ref1'], row['ref2'], row['ref3'], row['ref4'], row['ref5']]
+            ref_list = [str(row['ref1']), str(row['ref2']), str(row['ref3']), str(row['ref4']), str(row['ref5'])]
 
             if np.random.random() < self.real_reference_probability:
                 # Use ImageNet external reference
@@ -501,7 +501,7 @@ class FusionSequenceDataset(Dataset):
                 first_frame_name = self.annotations[
                     self.annotations['video_name'] == video_name
                 ].iloc[0]['current_frame']
-                reference = self._load_frame(video_name, first_frame_name, source_path)
+                reference = self._load_frame(video_name, str(first_frame_name), source_path)
 
             reference_resized = reference.resize(self.target_size[::-1], Image.LANCZOS)
             references_pil.append(reference_resized)
