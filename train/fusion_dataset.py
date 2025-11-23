@@ -390,7 +390,7 @@ class FusionSequenceDataset(Dataset):
 
     def _load_frame(self, video_name, frame_name, source_path=None):
         """
-        Load a single frame as PIL Image
+        Load a single frame as PIL Image (flexible path search)
 
         Args:
             video_name: Video folder name
@@ -400,24 +400,44 @@ class FusionSequenceDataset(Dataset):
         Returns:
             PIL Image
         """
-        # Try source path first if provided
-        if source_path:
-            frame_path = os.path.join(source_path, video_name, frame_name)
-            if os.path.exists(frame_path):
-                return Image.open(frame_path).convert('RGB')
+        import glob
 
-        # Search in all DAVIS paths
-        for davis_path in self.davis_roots:
-            frame_path = os.path.join(davis_path, video_name, frame_name)
-            if os.path.exists(frame_path):
-                return Image.open(frame_path).convert('RGB')
+        # Prepare search paths
+        search_paths = [source_path] if source_path else []
+        search_paths.extend(self.davis_roots)
 
-        # If not found, raise error
-        raise FileNotFoundError(f"Frame not found: {video_name}/{frame_name} in paths {self.davis_roots}")
+        for base_path in search_paths:
+            if not base_path:
+                continue
+
+            # Try multiple path patterns
+            patterns = [
+                os.path.join(base_path, video_name, frame_name),  # path/video/frame.png
+                os.path.join(base_path, frame_name),              # path/frame.png (flat structure)
+                os.path.join(base_path, video_name, f"*{frame_name}*"),  # flexible name matching
+            ]
+
+            for pattern in patterns:
+                # Direct path check
+                if '*' not in pattern and os.path.exists(pattern):
+                    return Image.open(pattern).convert('RGB')
+
+                # Glob pattern matching
+                if '*' in pattern:
+                    matches = glob.glob(pattern)
+                    if matches:
+                        return Image.open(matches[0]).convert('RGB')
+
+        # If not found, raise error with helpful message
+        raise FileNotFoundError(
+            f"Frame not found: {video_name}/{frame_name}\n"
+            f"Searched in paths: {self.davis_roots}\n"
+            f"Hint: Check if video folders or frame files exist in the dataset path"
+        )
 
     def _select_reference(self, ref_list):
         """
-        Select one reference from the list of 5 candidates
+        Select one reference from the list of 5 candidates (flexible path search)
 
         Args:
             ref_list: List of 5 ImageNet reference paths
@@ -426,19 +446,37 @@ class FusionSequenceDataset(Dataset):
             PIL Image of selected reference
         """
         import random
+        import glob
 
         # Randomly select one from the 5 candidates
         ref_path = random.choice(ref_list)
 
-        # Search in all ImageNet paths
+        # Search in all ImageNet paths with flexible matching
         for imagenet_path in self.imagenet_roots:
-            ref_full_path = os.path.join(imagenet_path, ref_path)
-            if os.path.exists(ref_full_path):
-                try:
-                    return Image.open(ref_full_path).convert('RGB')
-                except Exception as e:
-                    print(f"Warning: Failed to load reference {ref_full_path}: {e}")
-                    continue
+            patterns = [
+                os.path.join(imagenet_path, ref_path),              # Direct path
+                os.path.join(imagenet_path, f"*{ref_path}*"),       # Flexible matching
+                os.path.join(imagenet_path, os.path.basename(ref_path)),  # Just filename
+            ]
+
+            for pattern in patterns:
+                # Direct path check
+                if '*' not in pattern and os.path.exists(pattern):
+                    try:
+                        return Image.open(pattern).convert('RGB')
+                    except Exception as e:
+                        print(f"Warning: Failed to load reference {pattern}: {e}")
+                        continue
+
+                # Glob pattern matching
+                if '*' in pattern:
+                    matches = glob.glob(pattern)
+                    if matches:
+                        try:
+                            return Image.open(matches[0]).convert('RGB')
+                        except Exception as e:
+                            print(f"Warning: Failed to load reference {matches[0]}: {e}")
+                            continue
 
         # Fallback: return a blank reference
         print(f"Warning: Reference not found in any path: {ref_path}")
