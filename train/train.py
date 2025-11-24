@@ -1,15 +1,16 @@
 """
 Fusion Training Script
 
-Online training mode: runs MemFlow and SwinTExCo on-the-fly for each batch.
+Sequential training mode: processes 4-frame sequences with MemFlow memory accumulation.
 
 Usage:
-    python fusion/train.py \
-        --memflow_path ../MemFlow \
-        --swintexco_path ../SwinSingle \
-        --memflow_ckpt ../MemFlow/checkpoints/memflow_best.pth \
-        --swintexco_ckpt ../SwinSingle/checkpoints/best/ \
-        --data_root /path/to/train_videos \
+    python train/train.py \
+        --memflow_path MemFlow \
+        --swintexco_path SwinSingle \
+        --memflow_ckpt MemFlow/ckpt/memflow_colorization.pth \
+        --swintexco_ckpt SwinSingle/ckpt/epoch_1 \
+        --dataset /path/to/dataset1,/path/to/dataset2 \
+        --imagenet /path/to/imagenet \
         --batch_size 2 \
         --epochs 50
 """
@@ -27,32 +28,13 @@ from tqdm import tqdm
 sys.path.insert(0, '.')
 
 from train.fusion_system import FusionSystem
-from FusionNet.fusion_unet import SimpleFusionNet
+from FusionNet.fusion_unet import FusionNetV1
 from train.fusion_loss import FusionLoss
-from train.fusion_dataset import FusionDataset
-
-
-def fusion_collate_fn(batch):
-    """
-    Custom collate function to handle PIL Images in batch
-
-    Args:
-        batch: list of tuples (frame_t_lab, frame_t1_lab, reference_pil, target_pil, gt_ab)
-
-    Returns:
-        Batched tensors and lists of PIL images
-    """
-    frame_t_batch = torch.stack([item[0] for item in batch])
-    frame_t1_batch = torch.stack([item[1] for item in batch])
-    reference_pil_list = [item[2] for item in batch]  # Keep as list
-    target_pil_list = [item[3] for item in batch]     # Keep as list
-    gt_ab_batch = torch.stack([item[4] for item in batch])
-
-    return frame_t_batch, frame_t1_batch, reference_pil_list, target_pil_list, gt_ab_batch
+from train.fusion_dataset import FusionSequenceDataset, fusion_sequence_collate_fn
 
 
 def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
-    """Train for one epoch"""
+    """Train for one epoch with 4-frame sequences"""
 
     system.train()
     epoch_losses = {
@@ -64,44 +46,55 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
     }
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
+    total_sequences = 0
 
-    for batch_idx, (frame_t, frame_t1, reference_pil, target_pil, gt_ab) in enumerate(pbar):
-        # Move to device
-        frame_t = frame_t.to(args.device)
-        frame_t1 = frame_t1.to(args.device)
-        gt_ab = gt_ab.to(args.device)
+    for batch_idx, batch_data in enumerate(pbar):
+        # Extract batch data from fusion_sequence_collate_fn
+        frames_lab_batch = batch_data['frames_lab']  # List[List[Tensor]], batch_size x seq_len
+        frames_pil_batch = batch_data['frames_pil']  # List[List[PIL.Image]]
+        references_pil_batch = batch_data['references_pil']  # List[List[PIL.Image]]
+        video_names = batch_data['video_names']  # List[str]
 
-        # Handle PIL images (batch processing)
-        # Note: SwinTExCo processes one image at a time
-        # So we need to loop for batch > 1
-        batch_size = frame_t.shape[0]
+        batch_size = len(frames_lab_batch)
+        sequence_losses = []
 
-        # Reset memory for each video sequence
-        if batch_idx % args.video_length == 0:
-            system.reset_memory()
+        # Process each sequence in the batch
+        for seq_idx in range(batch_size):
+            frames_lab = frames_lab_batch[seq_idx]  # List of 4 LAB tensors
+            frames_pil = frames_pil_batch[seq_idx]  # List of 4 PIL images
+            references_pil = references_pil_batch[seq_idx]  # List of 4 PIL references
 
-        # Forward pass with mixed precision
-        with autocast(enabled=args.use_amp):
-            # For now, process batch_size=1
-            # TODO: Add batch processing for SwinTExCo
-            if batch_size > 1:
-                raise NotImplementedError("Batch size > 1 not yet supported. Use --batch_size 1")
+            # Move LAB tensors to device
+            frames_lab = [f.to(args.device) for f in frames_lab]
 
-            fused_ab = system(
-                frame_t,
-                frame_t1,
-                reference_pil[0],  # First item in batch
-                target_pil[0]
-            )
+            # Process sequence (4 frames) with forward_sequence
+            with autocast(enabled=args.use_amp):
+                # Forward sequence: returns List of 4 LAB outputs
+                outputs = system.forward_sequence(frames_lab, frames_pil, references_pil)
 
-            # Compute loss
-            loss, loss_dict = criterion(fused_ab, gt_ab)
+                # Compute loss for each frame in the sequence
+                frame_losses = []
+                for i, (output_lab, gt_lab) in enumerate(zip(outputs, frames_lab)):
+                    # Extract AB channels for loss computation
+                    output_ab = output_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
+                    gt_ab = gt_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
 
-            # Scale loss for gradient accumulation
-            loss = loss / args.accumulation_steps
+                    # Compute loss
+                    loss, loss_dict = criterion(output_ab, gt_ab)
+                    frame_losses.append(loss)
+
+                # Average loss over 4 frames
+                seq_loss = sum(frame_losses) / len(frame_losses)
+                sequence_losses.append(seq_loss)
+
+        # Average loss over batch
+        batch_loss = sum(sequence_losses) / len(sequence_losses)
+
+        # Scale for gradient accumulation
+        scaled_loss = batch_loss / args.accumulation_steps
 
         # Backward pass
-        scaler.scale(loss).backward()
+        scaler.scale(scaled_loss).backward()
 
         # Gradient accumulation
         if (batch_idx + 1) % args.accumulation_steps == 0:
@@ -114,18 +107,19 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
             scaler.update()
             optimizer.zero_grad()
 
-        # Accumulate losses
-        for key in epoch_losses.keys():
-            if key in loss_dict:
-                epoch_losses[key] += loss_dict[key]
+        # Accumulate losses (use last frame's loss_dict for display)
+        epoch_losses['total'] += batch_loss.item()
+        if loss_dict:
+            for key in ['l1', 'perceptual', 'contextual', 'temporal']:
+                if key in loss_dict:
+                    epoch_losses[key] += loss_dict[key]
+
+        total_sequences += batch_size
 
         # Update progress bar
         pbar.set_postfix({
-            'loss': loss_dict['total'],
-            'l1': loss_dict['l1'],
-            'perc': loss_dict.get('perceptual', 0),
-            'ctx': loss_dict.get('contextual', 0),
-            'temp': loss_dict.get('temporal', 0)
+            'loss': batch_loss.item(),
+            'seqs': total_sequences
         })
 
     # Average losses
@@ -134,46 +128,6 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
         epoch_losses[key] /= num_batches
 
     return epoch_losses
-
-
-def validate(system, dataloader, criterion, args):
-    """Validation"""
-
-    system.eval()
-    val_losses = {
-        'total': 0.0,
-        'l1': 0.0,
-        'perceptual': 0.0,
-        'contextual': 0.0
-    }
-
-    with torch.no_grad():
-        for batch_idx, (frame_t, frame_t1, reference_pil, target_pil, gt_ab) in enumerate(dataloader):
-            frame_t = frame_t.to(args.device)
-            frame_t1 = frame_t1.to(args.device)
-            gt_ab = gt_ab.to(args.device)
-
-            # Reset memory
-            if batch_idx % args.video_length == 0:
-                system.reset_memory()
-
-            # Forward
-            fused_ab = system(frame_t, frame_t1, reference_pil[0], target_pil[0])
-
-            # Loss
-            loss, loss_dict = criterion(fused_ab, gt_ab)
-
-            # Accumulate
-            for key in val_losses.keys():
-                if key in loss_dict:
-                    val_losses[key] += loss_dict[key]
-
-    # Average
-    num_batches = len(dataloader)
-    for key in val_losses.keys():
-        val_losses[key] /= num_batches
-
-    return val_losses
 
 
 def main():
@@ -188,8 +142,10 @@ def main():
                         help='Path to MemFlow checkpoint')
     parser.add_argument('--swintexco_ckpt', type=str, required=True,
                         help='Path to SwinTExCo checkpoint directory')
-    parser.add_argument('--data_root', type=str, required=True,
-                        help='Root directory of training videos (comma-separated for multiple paths, e.g., /path1,/path2,/path3)')
+    parser.add_argument('--dataset', type=str, required=True,
+                        help='Dataset path(s): single or comma-separated (e.g., /path1,/path2,/path3)')
+    parser.add_argument('--imagenet', type=str, required=True,
+                        help='ImageNet path(s): single or comma-separated (e.g., /path1,/path2,/path3)')
 
     # Training
     parser.add_argument('--batch_size', type=int, default=1,
@@ -198,10 +154,12 @@ def main():
                         help='Gradient accumulation steps (effective batch size = batch_size * accumulation_steps)')
     parser.add_argument('--epochs', type=int, default=50,
                         help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate')
-    parser.add_argument('--video_length', type=int, default=100,
-                        help='Assumed video length for memory reset')
+    parser.add_argument('--lr_swintexco', type=float, default=1e-5,
+                        help='Learning rate for SwinTExCo (fine-tuning)')
+    parser.add_argument('--lr_fusion', type=float, default=1e-4,
+                        help='Learning rate for FusionNet (training from scratch)')
+    parser.add_argument('--sequence_length', type=int, default=4,
+                        help='Length of frame sequences (default: 4)')
 
     # Optimization
     parser.add_argument('--use_amp', action='store_true', default=True,
@@ -235,7 +193,7 @@ def main():
         swintexco_path=args.swintexco_path,
         memflow_ckpt=args.memflow_ckpt,
         swintexco_ckpt=args.swintexco_ckpt,
-        fusion_net=SimpleFusionNet(),  # Use real UNet
+        fusion_net=FusionNetV1(),  # Real FusionNet UNet
         device=args.device
     )
 
@@ -249,12 +207,14 @@ def main():
         device=args.device
     )
 
-    # Optimizer (only Fusion UNet parameters)
-    optimizer = torch.optim.AdamW(
-        system.parameters(),  # Only returns Fusion UNet params
-        lr=args.lr,
-        weight_decay=1e-4
-    )
+    # Optimizer with layered learning rates
+    # SwinTExCo: fine-tuning with lower LR (1e-5)
+    # FusionNet: training from scratch with higher LR (1e-4)
+    param_groups = system.get_parameter_groups()
+    optimizer = torch.optim.AdamW([
+        {'params': param_groups[0]['params'], 'lr': args.lr_swintexco, 'name': 'swintexco'},
+        {'params': param_groups[1]['params'], 'lr': args.lr_fusion, 'name': 'fusion'}
+    ], weight_decay=1e-4)
 
     # Scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -265,8 +225,10 @@ def main():
 
     # Dataset
     print("\nLoading dataset...")
-    train_dataset = FusionDataset(
-        data_root=args.data_root,
+    train_dataset = FusionSequenceDataset(
+        davis_root=args.dataset,
+        imagenet_root=args.imagenet,
+        sequence_length=args.sequence_length,
         target_size=(224, 224)
     )
 
@@ -276,7 +238,7 @@ def main():
         shuffle=True,
         num_workers=4,
         pin_memory=True,
-        collate_fn=fusion_collate_fn
+        collate_fn=fusion_sequence_collate_fn
     )
 
     # Mixed precision scaler
@@ -285,10 +247,13 @@ def main():
     # Training loop
     print("\nStarting training...")
     print(f"  Epochs: {args.epochs}")
+    print(f"  Sequences: {len(train_dataset)}")
     print(f"  Batch size: {args.batch_size}")
     print(f"  Accumulation steps: {args.accumulation_steps}")
     print(f"  Effective batch size: {args.batch_size * args.accumulation_steps}")
-    print(f"  Learning rate: {args.lr}")
+    print(f"  Sequence length: {args.sequence_length}")
+    print(f"  Learning rate (SwinTExCo): {args.lr_swintexco}")
+    print(f"  Learning rate (FusionNet): {args.lr_fusion}")
     print(f"  Device: {args.device}")
     print()
 
@@ -321,6 +286,9 @@ def main():
             checkpoint = {
                 'epoch': epoch,
                 'fusion_unet': system.fusion_unet.state_dict(),
+                'swintexco_embed': system.swintexco.embed_net.state_dict(),
+                'swintexco_nonlocal': system.swintexco.nonlocal_net.state_dict(),
+                'swintexco_colornet': system.swintexco.colornet.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'best_loss': best_loss,

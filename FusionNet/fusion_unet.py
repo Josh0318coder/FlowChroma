@@ -17,31 +17,38 @@ class PlaceholderFusion(nn.Module):
     the entire system works before implementing the real UNet.
 
     Input:
-        - memflow_ab: [B, 2, H, W] MemFlow AB prediction
-        - swintexco_ab: [B, 2, H, W] SwinTExCo AB prediction
+        - memflow_lab: [B, 3, H, W] MemFlow LAB prediction
         - memflow_conf: [B, 1, H, W] MemFlow confidence
+        - swintexco_lab: [B, 3, H, W] SwinTExCo LAB prediction
         - swintexco_sim: [B, 1, H, W] SwinTExCo similarity
-        - L_channel: [B, 1, H, W] Luminance channel
+        - L_channel: [B, 1, H, W] Luminance channel (for reference)
 
     Output:
-        - fused_ab: [B, 2, H, W] Fused AB channels
+        - fused_lab: [B, 3, H, W] Fused LAB
     """
     def __init__(self):
         super().__init__()
 
-    def forward(self, memflow_ab, swintexco_ab, memflow_conf, swintexco_sim, L_channel):
+    def forward(self, memflow_lab, memflow_conf, swintexco_lab, swintexco_sim, L_channel):
         """
-        Simple confidence-based weighted average
+        Simple confidence-based weighted average fusion
         """
+        # Extract AB channels from LAB predictions
+        memflow_ab = memflow_lab[:, 1:3, :, :]
+        swintexco_ab = swintexco_lab[:, 1:3, :, :]
+
         # Normalize confidences to sum to 1
         total_conf = memflow_conf + swintexco_sim + 1e-6
         weight_memflow = memflow_conf / total_conf
         weight_swin = swintexco_sim / total_conf
 
-        # Weighted fusion
+        # Weighted fusion of AB channels
         fused_ab = weight_memflow * memflow_ab + weight_swin * swintexco_ab
 
-        return fused_ab
+        # Combine L channel with fused AB to create complete LAB
+        fused_lab = torch.cat([L_channel, fused_ab], dim=1)
+
+        return fused_lab
 
 
 class SimpleFusionNet(nn.Module):

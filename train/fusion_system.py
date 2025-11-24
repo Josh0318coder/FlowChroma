@@ -243,12 +243,12 @@ class FusionSystem(nn.Module):
             target_pil: PIL Image (RGB)
 
         Returns:
-            swintexco_ab: [B, 2, H, W] (normalized to [-1, 1])
+            swintexco_lab: [B, 3, H, W] - Complete LAB (L from target + predicted AB)
             similarity_map: [B, 1, H, W]
 
         Note:
             This requires SwinTExCo to be modified to return similarity_map.
-            See fusion/README.md for required modifications.
+            SwinTExCo only predicts AB channels, we combine with target L channel.
         """
         # Disable autocast for SwinTExCo (not compatible with mixed precision)
         with torch.no_grad(), autocast(enabled=False):
@@ -263,7 +263,6 @@ class FusionSystem(nn.Module):
             features_B = self.swintexco.embed_net(ref_rgb)
 
             # Process target and get prediction with similarity_map
-            # Note: This calls the modified __proccess_sample that returns similarity_map
             target_lab = self.swintexco.processor(target_pil).unsqueeze(0).to(self.device)
             target_l = target_lab[:, 0:1, :, :]
 
@@ -281,11 +280,103 @@ class FusionSystem(nn.Module):
                 joint_training=False
             )
 
-        return ab_predict, similarity_map
+            # Combine target L with predicted AB to form complete LAB
+            swintexco_lab = torch.cat([target_l, ab_predict], dim=1)
+
+        return swintexco_lab, similarity_map
+
+    def forward_sequence(self, frames_lab, frames_pil, references_pil):
+        """
+        Process a 4-frame sequence
+
+        Args:
+            frames_lab: List of 4 LAB tensors [3, H, W] (normalized to [-1, 1])
+            frames_pil: List of 4 PIL Images (RGB) for target frames
+            references_pil: List of 4 PIL Images (RGB) for reference frames
+
+        Returns:
+            outputs: List of 4 fused LAB tensors [3, H, W]
+        """
+        # Reset memory for new sequence
+        self.reset_memory()
+
+        outputs = []
+
+        # Process each frame pair sequentially
+        for i in range(len(frames_lab)):
+            # Add batch dimension
+            frame_lab = frames_lab[i].unsqueeze(0)  # [1, 3, H, W]
+            frame_pil = frames_pil[i]
+            reference_pil = references_pil[i]
+
+            if i == 0:
+                # First frame: MemFlow uses zero placeholder
+                output = self.forward_single_frame(
+                    None,  # No previous frame
+                    frame_lab,
+                    reference_pil,
+                    frame_pil,
+                    is_first=True
+                )
+            else:
+                # Subsequent frames: use previous frame
+                prev_frame_lab = frames_lab[i-1].unsqueeze(0)
+                output = self.forward_single_frame(
+                    prev_frame_lab,
+                    frame_lab,
+                    reference_pil,
+                    frame_pil,
+                    is_first=False
+                )
+
+            # Remove batch dimension and store
+            outputs.append(output.squeeze(0))
+
+        return outputs
+
+    def forward_single_frame(self, frame_t, frame_t1, reference_pil, target_pil, is_first=False):
+        """
+        Process a single frame (used within sequence processing)
+
+        Args:
+            frame_t: [B, 3, H, W] LAB tensor (previous frame, None if first)
+            frame_t1: [B, 3, H, W] LAB tensor (current frame)
+            reference_pil: PIL Image (RGB)
+            target_pil: PIL Image (RGB)
+            is_first: bool, whether this is the first frame
+
+        Returns:
+            fused_lab: [B, 3, H, W] - Complete LAB prediction
+        """
+        B, _, H, W = frame_t1.shape
+        L_channel = frame_t1[:, 0:1, :, :]
+
+        # 1. MemFlow inference (frozen)
+        if is_first:
+            # First frame: use zero placeholder
+            memflow_lab = torch.zeros(B, 3, H, W, device=self.device)
+            memflow_conf = torch.zeros(B, 1, H, W, device=self.device)
+        else:
+            # Subsequent frames: normal inference
+            memflow_lab, memflow_conf = self.memflow_inference(frame_t, frame_t1)
+
+        # 2. SwinTExCo inference (always valid)
+        swintexco_lab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
+
+        # 3. Fusion UNet inference (trainable)
+        fused_lab = self.fusion_unet(
+            memflow_lab,
+            memflow_conf,
+            swintexco_lab,
+            swintexco_sim,
+            L_channel
+        )
+
+        return fused_lab
 
     def forward(self, frame_t, frame_t1, reference_pil, target_pil):
         """
-        Complete forward pass
+        Complete forward pass (legacy interface for 2-frame processing)
 
         Args:
             frame_t: [B, 3, H, W] LAB tensor (normalized)
@@ -296,32 +387,7 @@ class FusionSystem(nn.Module):
         Returns:
             fused_lab: [B, 3, H, W] - Complete LAB prediction
         """
-        # Extract L channel
-        B, _, H, W = frame_t1.shape
-        L_channel = frame_t1[:, 0:1, :, :]
-
-        # 1. MemFlow inference (frozen)
-        if self.curr_ti == -1:
-            # First frame: use zero placeholder (entire branch invalid)
-            memflow_lab = torch.zeros(B, 3, H, W, device=self.device)
-            memflow_conf = torch.zeros(B, 1, H, W, device=self.device)
-        else:
-            # Subsequent frames: normal inference
-            memflow_lab, memflow_conf = self.memflow_inference(frame_t, frame_t1)
-
-        # 2. SwinTExCo inference (always valid)
-        swintexco_ab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
-
-        # 3. Fusion UNet inference (trainable)
-        fused_lab = self.fusion_unet(
-            memflow_lab,
-            memflow_conf,
-            swintexco_ab,
-            swintexco_sim,
-            L_channel
-        )
-
-        return fused_lab
+        return self.forward_single_frame(frame_t, frame_t1, reference_pil, target_pil, is_first=(self.curr_ti == -1))
 
     def train(self, mode=True):
         """Override train to affect SwinTExCo and Fusion UNet"""

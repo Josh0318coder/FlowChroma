@@ -2,14 +2,16 @@
 Test Fusion System
 
 Quick test to verify that the entire system works before training.
-Uses PlaceholderFusion to test data flow.
+Tests 4-frame sequence processing with FusionSequenceDataset.
 
 Usage:
-    python fusion/test.py \
-        --memflow_path ../MemFlow \
-        --swintexco_path ../SwinSingle \
-        --memflow_ckpt ../MemFlow/checkpoints/memflow_best.pth \
-        --swintexco_ckpt ../SwinSingle/checkpoints/best/
+    python train/test.py \
+        --memflow_path MemFlow \
+        --swintexco_path SwinSingle \
+        --memflow_ckpt MemFlow/ckpt/memflow_colorization.pth \
+        --swintexco_ckpt SwinSingle/ckpt/epoch_1 \
+        --dataset /path/to/dataset \
+        --imagenet /path/to/imagenet
 """
 
 import argparse
@@ -23,27 +25,33 @@ sys.path.insert(0, '.')
 
 from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import PlaceholderFusion
+from train.fusion_dataset import FusionSequenceDataset
 
 
-def create_dummy_data(size=(224, 224)):
-    """Create dummy data for testing"""
-    # Create dummy frames as PIL Images
-    dummy_rgb = np.random.randint(0, 255, (*size, 3), dtype=np.uint8)
-    reference_pil = Image.fromarray(dummy_rgb)
-    target_pil = Image.fromarray(dummy_rgb)
+def create_dummy_sequence(size=(224, 224)):
+    """Create dummy 4-frame sequence for testing"""
+    frames_lab = []
+    frames_pil = []
+    references_pil = []
 
-    # Create dummy LAB tensors
-    frame_t = torch.randn(1, 3, *size)
-    frame_t1 = torch.randn(1, 3, *size)
+    for _ in range(4):
+        # Create dummy LAB tensor
+        lab_tensor = torch.randn(3, *size)
+        frames_lab.append(lab_tensor)
 
-    return frame_t, frame_t1, reference_pil, target_pil
+        # Create dummy PIL images
+        dummy_rgb = np.random.randint(0, 255, (*size, 3), dtype=np.uint8)
+        frames_pil.append(Image.fromarray(dummy_rgb))
+        references_pil.append(Image.fromarray(dummy_rgb))
+
+    return frames_lab, frames_pil, references_pil
 
 
 def test_fusion_system(args):
-    """Test the complete fusion system"""
+    """Test the complete fusion system with 4-frame sequences"""
 
     print("="*80)
-    print(" Fusion System Test".center(80))
+    print(" Fusion System Test (4-Frame Sequence)".center(80))
     print("="*80)
 
     # Initialize system with PlaceholderFusion
@@ -60,75 +68,105 @@ def test_fusion_system(args):
         print("✅ System initialized successfully!")
     except Exception as e:
         print(f"❌ Failed to initialize system: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
-    # Test forward pass
-    print("\n2. Testing forward pass...")
+    # Test sequence forward pass
+    print("\n2. Testing 4-frame sequence processing...")
     try:
-        frame_t, frame_t1, reference_pil, target_pil = create_dummy_data()
+        frames_lab, frames_pil, references_pil = create_dummy_sequence()
 
         if torch.cuda.is_available():
-            frame_t = frame_t.cuda()
-            frame_t1 = frame_t1.cuda()
+            frames_lab = [f.cuda() for f in frames_lab]
 
         with torch.no_grad():
-            output = system(frame_t, frame_t1, reference_pil, target_pil)
+            outputs = system.forward_sequence(frames_lab, frames_pil, references_pil)
 
-        print(f"✅ Forward pass successful!")
-        print(f"   Input shape: {frame_t.shape}")
-        print(f"   Output shape: {output.shape}")
-        print(f"   Output range: [{output.min():.3f}, {output.max():.3f}]")
+        print(f"✅ Sequence processing successful!")
+        print(f"   Input: 4 frames")
+        print(f"   Output: {len(outputs)} frames")
+        for i, output in enumerate(outputs):
+            print(f"   Frame {i}: shape={output.shape}, range=[{output.min():.3f}, {output.max():.3f}]")
 
-        # Verify output shape
-        assert output.shape == (1, 2, 224, 224), f"Expected (1, 2, 224, 224), got {output.shape}"
-        print(f"✅ Output shape verified!")
+        # Verify output
+        assert len(outputs) == 4, f"Expected 4 outputs, got {len(outputs)}"
+        for i, output in enumerate(outputs):
+            assert output.shape == (3, 224, 224), f"Frame {i}: expected (3, 224, 224), got {output.shape}"
+        print(f"✅ Output shapes verified!")
 
     except Exception as e:
-        print(f"❌ Forward pass failed: {e}")
+        print(f"❌ Sequence processing failed: {e}")
         import traceback
         traceback.print_exc()
         return False
 
-    # Test multiple frames (memory management)
-    print("\n3. Testing memory management...")
-    try:
-        system.reset_memory()
+    # Test with real dataset if provided
+    if args.dataset and args.imagenet:
+        print("\n3. Testing with real dataset...")
+        try:
+            dataset = FusionSequenceDataset(
+                davis_root=args.dataset,
+                imagenet_root=args.imagenet,
+                sequence_length=4,
+                target_size=(224, 224)
+            )
+            print(f"   Dataset loaded: {len(dataset)} sequences")
 
-        for i in range(3):
-            frame_t, frame_t1, reference_pil, target_pil = create_dummy_data()
+            # Test one sample
+            sample = dataset[0]
+            frames_lab = sample['frames_lab']
+            frames_pil = sample['frames_pil']
+            references_pil = sample['references_pil']
+
             if torch.cuda.is_available():
-                frame_t = frame_t.cuda()
-                frame_t1 = frame_t1.cuda()
+                frames_lab = [f.cuda() for f in frames_lab]
 
             with torch.no_grad():
-                output = system(frame_t, frame_t1, reference_pil, target_pil)
+                outputs = system.forward_sequence(frames_lab, frames_pil, references_pil)
 
-            print(f"   Frame {i+1}: output shape = {output.shape}")
+            print(f"✅ Real data test successful!")
+            print(f"   Video: {sample['video_name']}")
+            print(f"   Processed {len(outputs)} frames")
 
-        print(f"✅ Memory management working!")
-
-    except Exception as e:
-        print(f"❌ Memory management failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        except Exception as e:
+            print(f"❌ Real data test failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    else:
+        print("\n3. Skipping real dataset test (--dataset and --imagenet not provided)")
 
     # Test parameter count
     print("\n4. Checking trainable parameters...")
     try:
+        # System parameters (SwinTExCo + FusionNet)
         total_params = sum(p.numel() for p in system.parameters())
         trainable_params = sum(p.numel() for p in system.parameters() if p.requires_grad)
 
-        print(f"   Total parameters: {total_params:,}")
-        print(f"   Trainable parameters: {trainable_params:,}")
-        print(f"   Frozen parameters: {total_params - trainable_params:,}")
+        print(f"   System total parameters: {total_params:,}")
+        print(f"   System trainable parameters: {trainable_params:,}")
+        print(f"   System frozen parameters: {total_params - trainable_params:,}")
 
-        # For PlaceholderFusion, trainable should be 0
-        assert trainable_params == 0, f"PlaceholderFusion should have 0 trainable params, got {trainable_params}"
-        print(f"✅ Parameter freeze verified!")
+        # FusionNet parameters only
+        fusion_params = sum(p.numel() for p in system.fusion_unet.parameters())
+        fusion_trainable = sum(p.numel() for p in system.fusion_unet.parameters() if p.requires_grad)
+
+        print(f"\n   FusionNet parameters: {fusion_params:,}")
+        print(f"   FusionNet trainable: {fusion_trainable:,}")
+
+        # For PlaceholderFusion, should have 0 parameters
+        assert fusion_params == 0, f"PlaceholderFusion should have 0 params, got {fusion_params}"
+        print(f"✅ PlaceholderFusion verified (0 parameters)!")
+
+        # SwinTExCo should be trainable
+        print(f"\n   SwinTExCo is trainable: {trainable_params > 0}")
+        print(f"✅ Parameter structure verified!")
 
     except Exception as e:
         print(f"❌ Parameter check failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
     print("\n" + "="*80)
@@ -136,24 +174,27 @@ def test_fusion_system(args):
     print("="*80)
 
     print("\nNext steps:")
-    print("  1. Train MemFlow and SwinTExCo variants")
-    print("  2. Replace PlaceholderFusion with SimpleFusionNet in train.py")
-    print("  3. Run: python fusion/train.py")
+    print("  1. Replace PlaceholderFusion with FusionNetV1")
+    print("  2. Run training: python train/train.py")
 
     return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test Fusion System')
+    parser = argparse.ArgumentParser(description='Test Fusion System with 4-Frame Sequences')
 
     parser.add_argument('--memflow_path', type=str, required=True,
-                        help='Path to MyFlow repository')
+                        help='Path to MemFlow repository')
     parser.add_argument('--swintexco_path', type=str, required=True,
-                        help='Path to swinthxco_single repository')
+                        help='Path to SwinSingle repository')
     parser.add_argument('--memflow_ckpt', type=str, required=True,
                         help='Path to MemFlow checkpoint')
     parser.add_argument('--swintexco_ckpt', type=str, required=True,
                         help='Path to SwinTExCo checkpoint directory')
+    parser.add_argument('--dataset', type=str, default=None,
+                        help='(Optional) Dataset path for real data testing')
+    parser.add_argument('--imagenet', type=str, default=None,
+                        help='(Optional) ImageNet path for real data testing')
 
     args = parser.parse_args()
 
