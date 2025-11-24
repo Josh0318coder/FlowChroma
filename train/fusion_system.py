@@ -251,7 +251,8 @@ class FusionSystem(nn.Module):
             SwinTExCo only predicts AB channels, we combine with target L channel.
         """
         # Disable autocast for SwinTExCo (not compatible with mixed precision)
-        with torch.no_grad(), autocast(enabled=False):
+        # Note: Do NOT use torch.no_grad() here during training, as SwinTExCo is trainable
+        with autocast(enabled=False):
             # Process reference
             ref_lab = self.swintexco.processor(reference_pil).unsqueeze(0).to(self.device)
 
@@ -277,7 +278,7 @@ class FusionSystem(nn.Module):
                 self.swintexco.colornet,
                 luminance_noise=0,
                 temperature=1e-10,
-                joint_training=False
+                joint_training=True  # Changed to True to enable gradients during training
             )
 
             # Combine target L with predicted AB to form complete LAB
@@ -363,11 +364,14 @@ class FusionSystem(nn.Module):
         # 2. SwinTExCo inference (always valid)
         swintexco_lab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
 
+        # Extract AB channels from SwinTExCo LAB for FusionNet
+        swintexco_ab = swintexco_lab[:, 1:3, :, :]
+
         # 3. Fusion UNet inference (trainable)
         fused_lab = self.fusion_unet(
             memflow_lab,
             memflow_conf,
-            swintexco_lab,
+            swintexco_ab,
             swintexco_sim,
             L_channel
         )

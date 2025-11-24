@@ -1,5 +1,5 @@
 """
-FlowChroma Inference Script
+FlowChroma Inference Script for Dataset Batch Processing
 
 Colorize grayscale video sequences using the complete FlowChroma architecture:
 - MemFlow: Temporal flow-based colorization (frozen)
@@ -12,10 +12,10 @@ Usage:
         --swintexco_path SwinSingle \
         --memflow_ckpt MemFlow/ckpt/memflow_colorization.pth \
         --swintexco_ckpt SwinSingle/ckpt/epoch_1 \
-        --fusion_ckpt fusion/checkpoints/fusion_best.pth \
-        --input /path/to/grayscale/frames \
-        --reference /path/to/reference/image.jpg \
-        --output /path/to/output
+        --fusion_ckpt checkpoints/fusion_best.pth \
+        --input_dirs /path/to/dataset1,/path/to/dataset2 \
+        --output_dir /path/to/output \
+        --target_size 224 224
 """
 
 import argparse
@@ -33,14 +33,13 @@ sys.path.insert(0, '.')
 
 from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import FusionNetV1
-from skimage import color
 
 
 def load_checkpoint(system, checkpoint_path, device):
-    """Load trained checkpoint"""
+    """Load trained FusionNet checkpoint"""
     if not os.path.exists(checkpoint_path):
         print(f"⚠️  Checkpoint not found: {checkpoint_path}")
-        print("   Using pre-trained SwinTExCo and untrained FusionNet")
+        print("   Using pre-trained MemFlow & SwinTExCo, untrained FusionNet")
         return
 
     print(f"Loading checkpoint: {checkpoint_path}")
@@ -63,77 +62,38 @@ def load_checkpoint(system, checkpoint_path, device):
     print(f"   Epoch: {epoch}, Best Loss: {best_loss}")
 
 
-def load_frames(input_path, max_frames=None):
+def rgb_to_lab_tensor(pil_image, target_size=(224, 224)):
     """
-    Load grayscale frames from directory or video file
+    Convert PIL RGB image to LAB tensor [3, H, W]
+
+    Args:
+        pil_image: PIL Image (RGB)
+        target_size: (H, W) tuple
 
     Returns:
-        List of PIL Images (RGB format, but grayscale content)
+        lab_tensor: [3, H, W] normalized to [-1, 1]
     """
-    frames = []
-
-    if os.path.isdir(input_path):
-        # Load from image directory
-        image_files = sorted(glob.glob(os.path.join(input_path, '*.jpg')) +
-                           glob.glob(os.path.join(input_path, '*.png')))
-
-        if max_frames:
-            image_files = image_files[:max_frames]
-
-        print(f"Loading {len(image_files)} frames from directory...")
-        for img_path in tqdm(image_files):
-            img = Image.open(img_path).convert('RGB')
-            frames.append(img)
-
-    elif os.path.isfile(input_path):
-        # Load from video file
-        print(f"Loading frames from video: {input_path}")
-        cap = cv2.VideoCapture(input_path)
-        frame_count = 0
-
-        pbar = tqdm(desc="Loading video frames")
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if max_frames and frame_count >= max_frames:
-                break
-
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(Image.fromarray(frame_rgb))
-            frame_count += 1
-            pbar.update(1)
-
-        cap.release()
-        pbar.close()
-        print(f"Loaded {len(frames)} frames from video")
-
-    else:
-        raise ValueError(f"Input path not found: {input_path}")
-
-    return frames
-
-
-def rgb_to_lab_tensor(pil_image, target_size=(224, 224)):
-    """Convert PIL RGB image to LAB tensor [3, H, W]"""
     # Resize
-    img_resized = pil_image.resize(target_size, Image.LANCZOS)
+    img_resized = pil_image.resize(target_size[::-1], Image.LANCZOS)  # PIL uses (W, H)
 
     # Convert to numpy array
-    img_np = np.array(img_resized).astype(np.float32) / 255.0
+    img_np = np.array(img_resized, dtype=np.uint8)
 
     # RGB to LAB
-    lab = color.rgb2lab(img_np)
+    lab_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB).astype(np.float32)
 
     # Normalize
-    lab[:, :, 0] = lab[:, :, 0] / 50.0 - 1.0  # L: [0, 100] -> [-1, 1]
-    lab[:, :, 1] = lab[:, :, 1] / 127.0       # A: [-127, 127] -> [-1, 1]
-    lab[:, :, 2] = lab[:, :, 2] / 127.0       # B: [-127, 127] -> [-1, 1]
+    lab_np[:, :, 0] = lab_np[:, :, 0] * 100.0 / 255.0  # L: [0, 100]
+    lab_np[:, :, 1] = lab_np[:, :, 1] - 128.0          # a: [-128, 127]
+    lab_np[:, :, 2] = lab_np[:, :, 2] - 128.0          # b: [-128, 127]
+
+    # Further normalize to [-1, 1]
+    lab_np[:, :, 0] = (lab_np[:, :, 0] / 50.0) - 1.0   # L: [-1, 1]
+    lab_np[:, :, 1] = lab_np[:, :, 1] / 127.0          # a: [-1, 1]
+    lab_np[:, :, 2] = lab_np[:, :, 2] / 127.0          # b: [-1, 1]
 
     # To tensor [3, H, W]
-    lab_tensor = torch.from_numpy(lab.transpose(2, 0, 1)).float()
+    lab_tensor = torch.from_numpy(lab_np).permute(2, 0, 1).float()
 
     return lab_tensor
 
@@ -153,116 +113,181 @@ def lab_tensor_to_rgb(lab_tensor):
 
     # Denormalize
     lab_np[:, :, 0] = (lab_np[:, :, 0] + 1.0) * 50.0  # L: [-1, 1] -> [0, 100]
-    lab_np[:, :, 1] = lab_np[:, :, 1] * 127.0         # A: [-1, 1] -> [-127, 127]
-    lab_np[:, :, 2] = lab_np[:, :, 2] * 127.0         # B: [-1, 1] -> [-127, 127]
+    lab_np[:, :, 1] = lab_np[:, :, 1] * 127.0         # a: [-1, 1] -> [-127, 127]
+    lab_np[:, :, 2] = lab_np[:, :, 2] * 127.0         # b: [-1, 1] -> [-127, 127]
+
+    # Convert to OpenCV LAB format
+    lab_cv = lab_np.copy()
+    lab_cv[:, :, 0] = lab_np[:, :, 0] * 255.0 / 100.0  # L
+    lab_cv[:, :, 1] = lab_np[:, :, 1] + 128.0          # a
+    lab_cv[:, :, 2] = lab_np[:, :, 2] + 128.0          # b
+
+    lab_cv = np.clip(lab_cv, 0, 255).astype(np.uint8)
 
     # LAB to RGB
-    rgb_np = color.lab2rgb(lab_np)
-    rgb_np = (rgb_np * 255).astype(np.uint8)
+    bgr_np = cv2.cvtColor(lab_cv, cv2.COLOR_LAB2BGR)
+    rgb_np = cv2.cvtColor(bgr_np, cv2.COLOR_BGR2RGB)
 
     return Image.fromarray(rgb_np)
 
 
-def process_sequence(system, frames_pil, reference_pil, sequence_length=4, target_size=(224, 224)):
+def process_scene(system, scene_path, output_scene_path, target_size=(224, 224)):
     """
-    Process frames in sliding window sequences
+    Process a single scene directory
 
     Args:
         system: FusionSystem
-        frames_pil: List of PIL Images
-        reference_pil: PIL Image (reference for all frames)
-        sequence_length: Number of frames per sequence
-        target_size: (H, W) tuple
-
-    Returns:
-        List of colorized PIL Images
+        scene_path: Path to scene directory containing frames
+        output_scene_path: Path to output directory for this scene
+        target_size: (H, W) tuple for resizing
     """
-    num_frames = len(frames_pil)
-    colorized_frames = []
+    # Get all image files
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
+    frame_files = []
+    for ext in image_extensions:
+        frame_files.extend(glob.glob(os.path.join(scene_path, ext)))
+        frame_files.extend(glob.glob(os.path.join(scene_path, ext.upper())))
 
-    print(f"\nProcessing {num_frames} frames in sequences of {sequence_length}...")
+    frame_files = sorted(frame_files)
 
-    # Process frames in overlapping sequences
-    for start_idx in tqdm(range(0, num_frames, sequence_length - 1)):
-        end_idx = min(start_idx + sequence_length, num_frames)
-        seq_frames = frames_pil[start_idx:end_idx]
-
-        # Pad if last sequence is shorter
-        if len(seq_frames) < sequence_length:
-            # Repeat last frame
-            last_frame = seq_frames[-1]
-            seq_frames = seq_frames + [last_frame] * (sequence_length - len(seq_frames))
-
-        # Convert to LAB tensors
-        frames_lab = []
-        frames_pil_seq = []
-        references_pil = []
-
-        for frame_pil in seq_frames:
-            lab_tensor = rgb_to_lab_tensor(frame_pil, target_size)
-            frames_lab.append(lab_tensor)
-            frames_pil_seq.append(frame_pil.resize(target_size, Image.LANCZOS))
-            references_pil.append(reference_pil.resize(target_size, Image.LANCZOS))
-
-        # Inference
-        with torch.no_grad():
-            outputs = system.forward_sequence(frames_lab, frames_pil_seq, references_pil)
-
-        # Convert outputs to RGB
-        for i, output_lab in enumerate(outputs):
-            # Only save non-overlapping frames (except for last sequence)
-            frame_idx = start_idx + i
-            if frame_idx < num_frames and (frame_idx < start_idx + 1 or start_idx == 0):
-                rgb_pil = lab_tensor_to_rgb(output_lab)
-                colorized_frames.append((frame_idx, rgb_pil))
-
-        # For overlapping frames (except first sequence), only take the first frame
-        if start_idx > 0:
-            continue
-
-    # Sort by frame index and return
-    colorized_frames.sort(key=lambda x: x[0])
-    return [frame for _, frame in colorized_frames]
-
-
-def save_frames(frames, output_dir, prefix="frame"):
-    """Save frames to directory"""
-    os.makedirs(output_dir, exist_ok=True)
-
-    print(f"\nSaving {len(frames)} frames to {output_dir}...")
-    for i, frame in enumerate(tqdm(frames)):
-        frame_path = os.path.join(output_dir, f"{prefix}_{i:05d}.png")
-        frame.save(frame_path)
-
-    print(f"✅ Frames saved to {output_dir}")
-
-
-def save_video(frames, output_path, fps=30):
-    """Save frames as video"""
-    if len(frames) == 0:
-        print("⚠️  No frames to save")
+    if len(frame_files) < 1:
+        print(f"  ⚠️  Skipping: no frames found")
         return
 
-    # Get frame size
-    width, height = frames[0].size
+    print(f"  📹 Found {len(frame_files)} frames")
 
-    # Create video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    # Load all frames as PIL Images
+    print(f"  📥 Loading frames...")
+    frames_pil = []
+    for frame_path in tqdm(frame_files, desc="  Loading", leave=False):
+        img = Image.open(frame_path).convert('RGB')
+        img_resized = img.resize(target_size[::-1], Image.LANCZOS)  # PIL uses (W, H)
+        frames_pil.append(img_resized)
 
-    print(f"\nSaving video to {output_path}...")
-    for frame in tqdm(frames):
-        # Convert PIL to OpenCV format (RGB -> BGR)
-        frame_np = np.array(frame)
-        frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
-        out.write(frame_bgr)
+    # First frame as reference
+    reference_pil = frames_pil[0]
+    print(f"  🎨 Using first frame as reference")
 
-    out.release()
-    print(f"✅ Video saved to {output_path}")
+    # Convert frames to LAB tensors
+    frames_lab = []
+    for frame_pil in frames_pil:
+        lab_tensor = rgb_to_lab_tensor(frame_pil, target_size)
+        frames_lab.append(lab_tensor)
+
+    # Reset memory for new video sequence
+    system.reset_memory()
+
+    # Process frames sequentially
+    print(f"  🎬 Processing {len(frames_lab)} frames...")
+    colorized_frames = []
+
+    with torch.no_grad():
+        for i in tqdm(range(len(frames_lab)), desc="  Colorizing", leave=False):
+            # Add batch dimension [1, 3, H, W]
+            frame_t1_batch = frames_lab[i].unsqueeze(0).to(system.device)
+
+            if i == 0:
+                # First frame: no previous frame
+                output_lab = system.forward_single_frame(
+                    None,
+                    frame_t1_batch,
+                    reference_pil,
+                    frames_pil[i],
+                    is_first=True
+                )
+            else:
+                # Subsequent frames: use previous frame
+                frame_t_batch = frames_lab[i-1].unsqueeze(0).to(system.device)
+                output_lab = system.forward_single_frame(
+                    frame_t_batch,
+                    frame_t1_batch,
+                    reference_pil,
+                    frames_pil[i],
+                    is_first=False
+                )
+
+            # Convert to RGB and remove batch dimension
+            output_rgb = lab_tensor_to_rgb(output_lab.squeeze(0))
+            colorized_frames.append(output_rgb)
+
+    # Save results with original filenames
+    os.makedirs(output_scene_path, exist_ok=True)
+    print(f"  💾 Saving colorized frames...")
+
+    for original_path, colorized_frame in zip(frame_files, colorized_frames):
+        # Preserve original filename
+        frame_name = os.path.basename(original_path)
+        output_path = os.path.join(output_scene_path, frame_name)
+        colorized_frame.save(output_path)
+
+    print(f"  ✅ Saved {len(colorized_frames)} frames to {output_scene_path}")
+
+
+def process_datasets(system, input_dirs, output_dir, target_size=(224, 224)):
+    """
+    Process multiple datasets with scene directories
+
+    Args:
+        system: FusionSystem
+        input_dirs: List of dataset root directories
+        output_dir: Root output directory
+        target_size: (H, W) tuple
+    """
+    print("\n" + "="*80)
+    print(f"📂 Scanning {len(input_dirs)} dataset(s)...")
+    print("="*80)
+
+    # Collect all scene directories from all input paths
+    all_scenes = []
+    for input_dir in input_dirs:
+        if not os.path.exists(input_dir):
+            print(f"⚠️  Warning: directory not found: {input_dir}")
+            continue
+
+        print(f"\n📁 Scanning: {input_dir}")
+        scene_count = 0
+        for item in sorted(os.listdir(input_dir)):
+            item_path = os.path.join(input_dir, item)
+            if os.path.isdir(item_path):
+                all_scenes.append((item, item_path))
+                scene_count += 1
+        print(f"   Found {scene_count} scenes")
+
+    if len(all_scenes) == 0:
+        print("❌ No scene directories found!")
+        return
+
+    print(f"\n📊 Total: {len(all_scenes)} scenes to process\n")
+
+    # Process each scene
+    for scene_idx, (scene_name, scene_path) in enumerate(all_scenes, 1):
+        print(f"🎬 [{scene_idx}/{len(all_scenes)}] Processing: {scene_name}")
+
+        output_scene_path = os.path.join(output_dir, scene_name)
+
+        try:
+            process_scene(
+                system,
+                scene_path,
+                output_scene_path,
+                target_size=target_size
+            )
+        except Exception as e:
+            print(f"  ❌ Error processing {scene_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+        print()  # Empty line between scenes
+
+    print("="*80)
+    print(f"✅ All datasets processed!")
+    print(f"📁 Results saved to: {output_dir}")
+    print("="*80)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='FlowChroma Video Colorization Inference')
+    parser = argparse.ArgumentParser(description='FlowChroma Dataset Batch Inference')
 
     # Model paths
     parser.add_argument('--memflow_path', type=str, required=True,
@@ -273,30 +298,18 @@ def main():
                         help='Path to MemFlow checkpoint')
     parser.add_argument('--swintexco_ckpt', type=str, required=True,
                         help='Path to SwinTExCo checkpoint directory')
-    parser.add_argument('--fusion_ckpt', type=str, default=None,
-                        help='Path to trained fusion checkpoint (optional)')
+    parser.add_argument('--fusion_ckpt', type=str, required=True,
+                        help='Path to trained fusion checkpoint')
 
     # Input/Output
-    parser.add_argument('--input', type=str, required=True,
-                        help='Input grayscale video or frames directory')
-    parser.add_argument('--reference', type=str, required=True,
-                        help='Reference color image (for style)')
-    parser.add_argument('--output', type=str, required=True,
-                        help='Output directory for colorized frames')
+    parser.add_argument('--input_dirs', type=str, required=True,
+                        help='Comma-separated dataset root directories (e.g., /path1,/path2)')
+    parser.add_argument('--output_dir', type=str, required=True,
+                        help='Output root directory')
 
     # Processing
-    parser.add_argument('--sequence_length', type=int, default=4,
-                        help='Number of frames per sequence (default: 4)')
     parser.add_argument('--target_size', type=int, nargs=2, default=[224, 224],
                         help='Target frame size (H W), default: 224 224')
-    parser.add_argument('--max_frames', type=int, default=None,
-                        help='Maximum number of frames to process (for testing)')
-
-    # Output format
-    parser.add_argument('--save_video', action='store_true',
-                        help='Save output as video (in addition to frames)')
-    parser.add_argument('--fps', type=int, default=30,
-                        help='Output video FPS (if --save_video)')
 
     # Device
     parser.add_argument('--device', type=str, default='cuda',
@@ -305,8 +318,14 @@ def main():
     args = parser.parse_args()
 
     print("="*80)
-    print(" FlowChroma Video Colorization".center(80))
+    print(" FlowChroma Dataset Batch Inference".center(80))
     print("="*80)
+
+    # Parse input directories
+    input_dirs = [d.strip() for d in args.input_dirs.split(',')]
+    print(f"\nInput directories: {len(input_dirs)}")
+    for i, d in enumerate(input_dirs, 1):
+        print(f"  [{i}] {d}")
 
     # Initialize system
     print("\nInitializing FlowChroma system...")
@@ -321,38 +340,16 @@ def main():
     system.eval()
 
     # Load trained checkpoint
-    if args.fusion_ckpt:
-        load_checkpoint(system, args.fusion_ckpt, args.device)
-    else:
-        print("⚠️  No fusion checkpoint provided, using untrained FusionNet")
+    load_checkpoint(system, args.fusion_ckpt, args.device)
 
-    # Load reference image
-    print(f"\nLoading reference image: {args.reference}")
-    reference_pil = Image.open(args.reference).convert('RGB')
-    print(f"✅ Reference image loaded: {reference_pil.size}")
-
-    # Load input frames
-    frames_pil = load_frames(args.input, max_frames=args.max_frames)
-    print(f"✅ Loaded {len(frames_pil)} frames")
-
-    if len(frames_pil) == 0:
-        print("❌ No frames found!")
-        return
-
-    # Process sequences
+    # Process datasets
     target_size = tuple(args.target_size)
-    colorized_frames = process_sequence(
-        system, frames_pil, reference_pil,
-        sequence_length=args.sequence_length,
+    process_datasets(
+        system=system,
+        input_dirs=input_dirs,
+        output_dir=args.output_dir,
         target_size=target_size
     )
-
-    # Save results
-    save_frames(colorized_frames, args.output)
-
-    if args.save_video:
-        video_path = os.path.join(args.output, 'colorized_video.mp4')
-        save_video(colorized_frames, video_path, fps=args.fps)
 
     print("\n" + "="*80)
     print("✅ Inference completed!")
