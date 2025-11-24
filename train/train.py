@@ -210,14 +210,11 @@ def main():
     # Optimizer with layered learning rates
     # SwinTExCo: fine-tuning with lower LR (1e-5)
     # FusionNet: training from scratch with higher LR (1e-4)
-    param_groups = system.get_parameter_groups(
-        lr_swintexco=args.lr_swintexco,
-        lr_fusion=args.lr_fusion
-    )
-    optimizer = torch.optim.AdamW(
-        param_groups,
-        weight_decay=1e-4
-    )
+    param_groups = system.get_parameter_groups()
+    optimizer = torch.optim.AdamW([
+        {'params': param_groups[0]['params'], 'lr': args.lr_swintexco, 'name': 'swintexco'},
+        {'params': param_groups[1]['params'], 'lr': args.lr_fusion, 'name': 'fusion'}
+    ], weight_decay=1e-4)
 
     # Scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
