@@ -286,6 +286,9 @@ def main():
             checkpoint = {
                 'epoch': epoch,
                 'fusion_unet': system.fusion_unet.state_dict(),
+                'swintexco_embed': system.swintexco.embed_net.state_dict(),
+                'swintexco_nonlocal': system.swintexco.nonlocal_net.state_dict(),
+                'swintexco_colornet': system.swintexco.colornet.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'best_loss': best_loss,
