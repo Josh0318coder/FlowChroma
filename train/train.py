@@ -238,7 +238,7 @@ def main():
         davis_root=args.dataset,
         imagenet_root=args.imagenet,
         sequence_length=args.sequence_length,
-        target_size=(224, 224)
+        target_size=(args.target_size, args.target_size)
     )
 
     train_loader = DataLoader(
