@@ -286,52 +286,72 @@ class FusionSystem(nn.Module):
 
     def forward_sequence(self, frames_lab, frames_pil, references_pil):
         """
-        Process a 4-frame sequence
+        Process a sequence of frames (for inference)
 
         Args:
-            frames_lab: List of 4 LAB tensors [3, H, W] (normalized to [-1, 1])
-            frames_pil: List of 4 PIL Images (RGB) for target frames
-            references_pil: List of 4 PIL Images (RGB) for reference frames
+            frames_lab: list of [3, H, W] LAB tensors (normalized to [-1, 1])
+            frames_pil: list of PIL Images (RGB, target frames)
+            references_pil: list of PIL Images (RGB, reference frames, typically all the same)
 
         Returns:
-            outputs: List of 4 fused LAB tensors [3, H, W]
+            list of [3, H, W] LAB tensors (colorized results, CPU)
         """
-        # Reset memory for new sequence
+        # Reset memory at the start of sequence
         self.reset_memory()
 
-        outputs = []
+        results = []
 
-        # Process each frame pair sequentially
         for i in range(len(frames_lab)):
-            # Add batch dimension
-            frame_lab = frames_lab[i].unsqueeze(0)  # [1, 3, H, W]
-            frame_pil = frames_pil[i]
-            reference_pil = references_pil[i]
+            # Convert to batch [1, 3, H, W]
+            frame_t1_batch = frames_lab[i].unsqueeze(0).to(self.device)
 
             if i == 0:
-                # First frame: MemFlow uses zero placeholder
-                output = self.forward_single_frame(
-                    None,  # No previous frame
-                    frame_lab,
-                    reference_pil,
-                    frame_pil,
-                    is_first=True
+                # First frame: manually construct output without calling forward()
+                # to avoid state management issues
+                B, _, H, W = frame_t1_batch.shape
+                L_channel = frame_t1_batch[:, 0:1, :, :]
+
+                # MemFlow: output zero (no temporal info for first frame)
+                memflow_lab = torch.zeros(B, 3, H, W, device=self.device)
+                memflow_conf = torch.zeros(B, 1, H, W, device=self.device)
+
+                # SwinTExCo: process reference-based colorization
+                swintexco_ab, swintexco_sim = self.swintexco_inference(
+                    references_pil[i],
+                    frames_pil[i]
                 )
+
+                # FusionNet: fuse results
+                output_lab = self.fusion_unet(
+                    memflow_lab,
+                    memflow_conf,
+                    swintexco_ab,
+                    swintexco_sim,
+                    L_channel
+                )
+
+                # After first frame, curr_ti remains -1 (will increment to 0 on next call)
             else:
-                # Subsequent frames: use previous frame
-                prev_frame_lab = frames_lab[i-1].unsqueeze(0)
-                output = self.forward_single_frame(
-                    prev_frame_lab,
-                    frame_lab,
-                    reference_pil,
-                    frame_pil,
-                    is_first=False
+                # Subsequent frames: use complete forward pass
+                frame_t_batch = frames_lab[i-1].unsqueeze(0).to(self.device)
+
+                # Forward pass (curr_ti will be managed automatically)
+                output_lab = self.forward(
+                    frame_t_batch,
+                    frame_t1_batch,
+                    references_pil[i],
+                    frames_pil[i]
                 )
 
-            # Remove batch dimension and store
-            outputs.append(output.squeeze(0))
+            # Remove batch dimension
+            # Keep on device for training (gradient computation)
+            # Move to CPU only during inference (when torch.no_grad() is active)
+            if torch.is_grad_enabled():
+                results.append(output_lab.squeeze(0))
+            else:
+                results.append(output_lab.squeeze(0).cpu())
 
-        return outputs
+        return results
 
     def forward_single_frame(self, frame_t, frame_t1, reference_pil, target_pil, is_first=False):
         """
