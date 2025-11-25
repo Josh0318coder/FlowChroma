@@ -76,47 +76,83 @@ class PerceptualLoss(nn.Module):
 
 class ContextualLoss(nn.Module):
     """
-    Contextual Loss
+    Contextual Loss (Standard Implementation from SwinTExCo)
 
-    Measures feature distribution similarity (useful for exemplar-based methods).
+    Measures feature distribution similarity using normalized cosine distance
+    and exponential affinity kernel.
 
     Reference: https://arxiv.org/abs/1803.02077
     """
-    def __init__(self, layers=['relu3_3'], h=0.5, device='cuda'):
+    def __init__(self, layers=['relu3_3'], h=0.1, device='cuda'):
         super().__init__()
 
-        self.h = h  # bandwidth parameter
+        self.h = h  # bandwidth parameter (default: 0.1, same as SwinTExCo)
         self.perceptual = PerceptualLoss(layers, device)
 
-    def forward(self, pred, target):
+    def _feature_normalize(self, feature_in):
         """
-        Simplified contextual loss using cosine similarity
+        L2 normalization (same as SwinTExCo's feature_normalize)
 
         Args:
-            pred: [B, 2, H, W]
-            target: [B, 2, H, W]
+            feature_in: [B, C, H, W] or [B, C, N]
 
         Returns:
-            loss: scalar
+            Normalized features
         """
-        # Flatten spatial dimensions
-        pred_flat = pred.flatten(2)  # [B, 2, H*W]
-        target_flat = target.flatten(2)
+        feature_in_norm = torch.norm(feature_in, 2, 1, keepdim=True) + 1e-10
+        feature_in_norm = torch.div(feature_in, feature_in_norm)
+        return feature_in_norm
 
-        # Normalize
-        pred_norm = F.normalize(pred_flat, dim=1)
-        target_norm = F.normalize(target_flat, dim=1)
+    def forward(self, pred, target, feature_centering=True):
+        """
+        Standard Contextual Loss (SwinTExCo implementation without chunking)
 
-        # Cosine similarity
-        similarity = torch.bmm(pred_norm.transpose(1, 2), target_norm)  # [B, H*W, H*W]
+        Args:
+            pred: [B, 2, H, W] predicted AB channels
+            target: [B, 2, H, W] ground truth AB channels
+            feature_centering: Whether to subtract mean (default: True)
 
-        # Contextual similarity (max over target features)
-        cx = torch.max(similarity, dim=2)[0]  # [B, H*W]
+        Returns:
+            loss: scalar (averaged over batch)
+        """
+        batch_size = pred.shape[0]
+        feature_depth = pred.shape[1]
+
+        # Convert to feature vectors
+        X_features = pred  # [B, 2, H, W]
+        Y_features = target  # [B, 2, H, W]
+
+        # Feature centering (subtract mean from target features)
+        if feature_centering:
+            Y_mean = Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
+            X_features = X_features - Y_mean
+            Y_features = Y_features - Y_mean
+
+        # Normalize features (L2 normalization)
+        X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
+        Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
+
+        # Cosine distance = 1 - similarity
+        X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, 2]
+        d = 1 - torch.matmul(X_features_permute, Y_features)  # [B, H*W, H*W]
+
+        # Normalized distance: d_ij / min(d_i)
+        # This emphasizes relative matching quality
+        d_norm = d / (torch.min(d, dim=-1, keepdim=True)[0] + 1e-5)  # [B, H*W, H*W]
+
+        # Pairwise affinity using exponential kernel
+        w = torch.exp((1 - d_norm) / self.h)  # [B, H*W, H*W]
+        A_ij = w / torch.sum(w, dim=-1, keepdim=True)  # Softmax normalization
+
+        # Contextual similarity per sample
+        # For each position in pred, find best match in target
+        CX = torch.mean(torch.max(A_ij, dim=1)[0], dim=-1)  # [B]
 
         # Contextual loss (negative log)
-        loss = -torch.log(cx + 1e-5).mean()
+        loss = -torch.log(CX + 1e-5)  # [B]
 
-        return loss
+        # Average over batch
+        return loss.mean()
 
 
 class TemporalLoss(nn.Module):
@@ -178,6 +214,7 @@ class FusionLoss(nn.Module):
                  lambda_contextual=0.1,
                  lambda_temporal=0.5,
                  use_temporal=True,
+                 contextual_chunk_size=256,
                  device='cuda'):
         super().__init__()
 
@@ -185,6 +222,7 @@ class FusionLoss(nn.Module):
         self.lambda_perceptual = lambda_perceptual
         self.lambda_contextual = lambda_contextual
         self.lambda_temporal = lambda_temporal
+        self.contextual_chunk_size = contextual_chunk_size
         self.use_temporal = use_temporal
 
         # Loss components
@@ -216,21 +254,24 @@ class FusionLoss(nn.Module):
         # Perceptual Loss
         loss_perceptual = self.perceptual_loss(pred_ab, gt_ab)
 
-        # Contextual Loss
-        loss_contextual = self.contextual_loss(pred_ab, gt_ab)
-
         # Total loss
         total_loss = (
             self.lambda_l1 * loss_l1 +
-            self.lambda_perceptual * loss_perceptual +
-            self.lambda_contextual * loss_contextual
+            self.lambda_perceptual * loss_perceptual
         )
 
         loss_dict = {
             'l1': loss_l1.item(),
             'perceptual': loss_perceptual.item(),
-            'contextual': loss_contextual.item(),
         }
+
+        # Contextual Loss (only compute if weight > 0 to save memory)
+        if self.lambda_contextual > 0:
+            loss_contextual = self.contextual_loss(pred_ab, gt_ab)
+            total_loss += self.lambda_contextual * loss_contextual
+            loss_dict['contextual'] = loss_contextual.item()
+        else:
+            loss_dict['contextual'] = 0.0
 
         # Temporal Loss (optional)
         if self.use_temporal and flow is not None and prev_pred_ab is not None:

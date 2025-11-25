@@ -243,12 +243,12 @@ class FusionSystem(nn.Module):
             target_pil: PIL Image (RGB)
 
         Returns:
-            swintexco_lab: [B, 3, H, W] - Complete LAB (L from target + predicted AB)
+            swintexco_ab: [B, 2, H, W] (normalized to [-1, 1])
             similarity_map: [B, 1, H, W]
 
         Note:
             This requires SwinTExCo to be modified to return similarity_map.
-            SwinTExCo only predicts AB channels, we combine with target L channel.
+            See fusion/README.md for required modifications.
         """
         # Disable autocast for SwinTExCo (not compatible with mixed precision)
         # Note: Do NOT use torch.no_grad() here during training, as SwinTExCo is trainable
@@ -264,6 +264,7 @@ class FusionSystem(nn.Module):
             features_B = self.swintexco.embed_net(ref_rgb)
 
             # Process target and get prediction with similarity_map
+            # Note: This calls the modified __proccess_sample that returns similarity_map
             target_lab = self.swintexco.processor(target_pil).unsqueeze(0).to(self.device)
             target_l = target_lab[:, 0:1, :, :]
 
@@ -281,59 +282,76 @@ class FusionSystem(nn.Module):
                 joint_training=True  # Changed to True to enable gradients during training
             )
 
-            # Combine target L with predicted AB to form complete LAB
-            swintexco_lab = torch.cat([target_l, ab_predict], dim=1)
-
-        return swintexco_lab, similarity_map
+        return ab_predict, similarity_map
 
     def forward_sequence(self, frames_lab, frames_pil, references_pil):
         """
-        Process a 4-frame sequence
+        Process a sequence of frames (for inference)
 
         Args:
-            frames_lab: List of 4 LAB tensors [3, H, W] (normalized to [-1, 1])
-            frames_pil: List of 4 PIL Images (RGB) for target frames
-            references_pil: List of 4 PIL Images (RGB) for reference frames
+            frames_lab: list of [3, H, W] LAB tensors (normalized to [-1, 1])
+            frames_pil: list of PIL Images (RGB, target frames)
+            references_pil: list of PIL Images (RGB, reference frames, typically all the same)
 
         Returns:
-            outputs: List of 4 fused LAB tensors [3, H, W]
+            list of [3, H, W] LAB tensors (colorized results, CPU)
         """
-        # Reset memory for new sequence
+        # Reset memory at the start of sequence
         self.reset_memory()
 
-        outputs = []
+        results = []
 
-        # Process each frame pair sequentially
         for i in range(len(frames_lab)):
-            # Add batch dimension
-            frame_lab = frames_lab[i].unsqueeze(0)  # [1, 3, H, W]
-            frame_pil = frames_pil[i]
-            reference_pil = references_pil[i]
+            # Convert to batch [1, 3, H, W]
+            frame_t1_batch = frames_lab[i].unsqueeze(0).to(self.device)
 
             if i == 0:
-                # First frame: MemFlow uses zero placeholder
-                output = self.forward_single_frame(
-                    None,  # No previous frame
-                    frame_lab,
-                    reference_pil,
-                    frame_pil,
-                    is_first=True
+                # First frame: manually construct output without calling forward()
+                # to avoid state management issues
+                B, _, H, W = frame_t1_batch.shape
+                L_channel = frame_t1_batch[:, 0:1, :, :]
+
+                # MemFlow: output zero (no temporal info for first frame)
+                memflow_lab = torch.zeros(B, 3, H, W, device=self.device)
+                memflow_conf = torch.zeros(B, 1, H, W, device=self.device)
+
+                # SwinTExCo: process reference-based colorization
+                swintexco_ab, swintexco_sim = self.swintexco_inference(
+                    references_pil[i],
+                    frames_pil[i]
                 )
+
+                # FusionNet: fuse results
+                output_lab = self.fusion_unet(
+                    memflow_lab,
+                    memflow_conf,
+                    swintexco_ab,
+                    swintexco_sim,
+                    L_channel
+                )
+
+                # After first frame, curr_ti remains -1 (will increment to 0 on next call)
             else:
-                # Subsequent frames: use previous frame
-                prev_frame_lab = frames_lab[i-1].unsqueeze(0)
-                output = self.forward_single_frame(
-                    prev_frame_lab,
-                    frame_lab,
-                    reference_pil,
-                    frame_pil,
-                    is_first=False
+                # Subsequent frames: use complete forward pass
+                frame_t_batch = frames_lab[i-1].unsqueeze(0).to(self.device)
+
+                # Forward pass (curr_ti will be managed automatically)
+                output_lab = self.forward(
+                    frame_t_batch,
+                    frame_t1_batch,
+                    references_pil[i],
+                    frames_pil[i]
                 )
 
-            # Remove batch dimension and store
-            outputs.append(output.squeeze(0))
+            # Remove batch dimension
+            # Keep on device for training (gradient computation)
+            # Move to CPU only during inference (when torch.no_grad() is active)
+            if torch.is_grad_enabled():
+                results.append(output_lab.squeeze(0))
+            else:
+                results.append(output_lab.squeeze(0).cpu())
 
-        return outputs
+        return results
 
     def forward_single_frame(self, frame_t, frame_t1, reference_pil, target_pil, is_first=False):
         """
@@ -362,16 +380,13 @@ class FusionSystem(nn.Module):
             memflow_lab, memflow_conf = self.memflow_inference(frame_t, frame_t1)
 
         # 2. SwinTExCo inference (always valid)
-        swintexco_lab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
-
-        # Extract AB channels from SwinTExCo LAB for FusionNet
-        swintexco_ab = swintexco_lab[:, 1:3, :, :]
+        swintexco_ab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
 
         # 3. Fusion UNet inference (trainable)
         fused_lab = self.fusion_unet(
             memflow_lab,
             memflow_conf,
-            swintexco_ab,
+            swintexco_ab,  # 直接使用 AB，因为您的版本已经返回 AB 了
             swintexco_sim,
             L_channel
         )

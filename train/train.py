@@ -167,6 +167,14 @@ def main():
     parser.add_argument('--max_grad_norm', type=float, default=1.0,
                         help='Max gradient norm for clipping')
 
+    # Memory Optimization
+    parser.add_argument('--target_size', type=int, default=224,
+                        help='Target frame size (default: 224 for 224x224). Use 128 or 160 to save memory')
+    parser.add_argument('--freeze_swintexco', action='store_true',
+                        help='Freeze SwinTExCo (only train FusionNet) to save memory')
+    parser.add_argument('--contextual_chunk_size', type=int, default=256,
+                        help='Chunk size for Contextual Loss (default: 256). Use 64 or 128 for less memory')
+
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='fusion/checkpoints',
                         help='Directory to save checkpoints')
@@ -204,6 +212,7 @@ def main():
         lambda_contextual=0.1,
         lambda_temporal=0.5,
         use_temporal=True,
+        contextual_chunk_size=args.contextual_chunk_size,
         device=args.device
     )
 
@@ -229,7 +238,7 @@ def main():
         davis_root=args.dataset,
         imagenet_root=args.imagenet,
         sequence_length=args.sequence_length,
-        target_size=(224, 224)
+        target_size=(args.target_size, args.target_size)
     )
 
     train_loader = DataLoader(
