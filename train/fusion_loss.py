@@ -283,21 +283,24 @@ class FusionLoss(nn.Module):
         # Perceptual Loss
         loss_perceptual = self.perceptual_loss(pred_ab, gt_ab)
 
-        # Contextual Loss
-        loss_contextual = self.contextual_loss(pred_ab, gt_ab)
-
         # Total loss
         total_loss = (
             self.lambda_l1 * loss_l1 +
-            self.lambda_perceptual * loss_perceptual +
-            self.lambda_contextual * loss_contextual
+            self.lambda_perceptual * loss_perceptual
         )
 
         loss_dict = {
             'l1': loss_l1.item(),
             'perceptual': loss_perceptual.item(),
-            'contextual': loss_contextual.item(),
         }
+
+        # Contextual Loss (only compute if weight > 0 to save memory)
+        if self.lambda_contextual > 0:
+            loss_contextual = self.contextual_loss(pred_ab, gt_ab)
+            total_loss += self.lambda_contextual * loss_contextual
+            loss_dict['contextual'] = loss_contextual.item()
+        else:
+            loss_dict['contextual'] = 0.0
 
         # Temporal Loss (optional)
         if self.use_temporal and flow is not None and prev_pred_ab is not None:

@@ -201,7 +201,7 @@ def main():
     criterion = FusionLoss(
         lambda_l1=1.0,
         lambda_perceptual=0.05,
-        lambda_contextual=0.1,
+        lambda_contextual=0.0,  # Disabled due to GPU memory constraints
         lambda_temporal=0.5,
         use_temporal=True,
         device=args.device
