@@ -167,6 +167,14 @@ def main():
     parser.add_argument('--max_grad_norm', type=float, default=1.0,
                         help='Max gradient norm for clipping')
 
+    # Memory Optimization
+    parser.add_argument('--target_size', type=int, default=224,
+                        help='Target frame size (default: 224 for 224x224). Use 128 or 160 to save memory')
+    parser.add_argument('--freeze_swintexco', action='store_true',
+                        help='Freeze SwinTExCo (only train FusionNet) to save memory')
+    parser.add_argument('--contextual_chunk_size', type=int, default=256,
+                        help='Chunk size for Contextual Loss (default: 256). Use 64 or 128 for less memory')
+
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='fusion/checkpoints',
                         help='Directory to save checkpoints')
@@ -201,7 +209,7 @@ def main():
     criterion = FusionLoss(
         lambda_l1=1.0,
         lambda_perceptual=0.05,
-        lambda_contextual=0.0,  # Disabled due to GPU memory constraints
+        lambda_contextual=0.1,
         lambda_temporal=0.5,
         use_temporal=True,
         device=args.device
