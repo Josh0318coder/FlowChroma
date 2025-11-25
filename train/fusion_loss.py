@@ -103,14 +103,17 @@ class ContextualLoss(nn.Module):
         feature_in_norm = torch.div(feature_in, feature_in_norm)
         return feature_in_norm
 
-    def forward(self, pred, target, feature_centering=True):
+    def forward(self, pred, target, feature_centering=True, chunk_size=256):
         """
-        Standard Contextual Loss (SwinTExCo implementation)
+        Memory-efficient Contextual Loss (SwinTExCo implementation with chunking)
 
         Args:
             pred: [B, 2, H, W] predicted AB channels
             target: [B, 2, H, W] ground truth AB channels
             feature_centering: Whether to subtract mean (default: True)
+            chunk_size: Process features in chunks to save memory (default: 256)
+                       For 224x224 images (50176 pixels), chunk_size=256 reduces
+                       memory from ~10GB to ~100MB per batch
 
         Returns:
             loss: scalar (averaged over batch)
@@ -132,21 +135,49 @@ class ContextualLoss(nn.Module):
         X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
         Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
 
-        # Cosine distance = 1 - similarity
         X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, 2]
-        d = 1 - torch.matmul(X_features_permute, Y_features)  # [B, H*W, H*W]
 
-        # Normalized distance: d_ij / min(d_i)
-        # This emphasizes relative matching quality
-        d_norm = d / (torch.min(d, dim=-1, keepdim=True)[0] + 1e-5)  # [B, H*W, H*W]
+        N = X_features_permute.shape[1]  # H*W
 
-        # Pairwise affinity using exponential kernel
-        w = torch.exp((1 - d_norm) / self.h)  # [B, H*W, H*W]
-        A_ij = w / torch.sum(w, dim=-1, keepdim=True)  # Softmax normalization
+        # Process in chunks to save memory
+        CX_list = []
 
-        # Contextual similarity per sample
-        # For each position in pred, find best match in target
-        CX = torch.mean(torch.max(A_ij, dim=1)[0], dim=-1)  # [B]
+        for b in range(batch_size):
+            # Process each sample in batch separately
+            X_b = X_features_permute[b]  # [H*W, 2]
+            Y_b = Y_features[b]  # [2, H*W]
+
+            cx_values = []
+
+            # Split into chunks
+            for i in range(0, N, chunk_size):
+                end_i = min(i + chunk_size, N)
+                X_chunk = X_b[i:end_i]  # [chunk, 2]
+
+                # Cosine distance for this chunk
+                d_chunk = 1 - torch.matmul(X_chunk, Y_b)  # [chunk, H*W]
+
+                # Normalized distance
+                d_min = torch.min(d_chunk, dim=-1, keepdim=True)[0]
+                d_norm_chunk = d_chunk / (d_min + 1e-5)
+
+                # Pairwise affinity using exponential kernel
+                w_chunk = torch.exp((1 - d_norm_chunk) / self.h)
+                A_ij_chunk = w_chunk / torch.sum(w_chunk, dim=-1, keepdim=True)
+
+                # Max affinity for this chunk
+                cx_chunk = torch.max(A_ij_chunk, dim=1)[0]  # [chunk]
+                cx_values.append(cx_chunk)
+
+                # Free memory
+                del d_chunk, d_norm_chunk, w_chunk, A_ij_chunk
+
+            # Concatenate all chunks for this sample
+            CX_b = torch.cat(cx_values, dim=0)  # [H*W]
+            CX_list.append(torch.mean(CX_b))
+
+        # Stack batch results
+        CX = torch.stack(CX_list)  # [B]
 
         # Contextual loss (negative log)
         loss = -torch.log(CX + 1e-5)  # [B]
