@@ -103,17 +103,15 @@ class ContextualLoss(nn.Module):
         feature_in_norm = torch.div(feature_in, feature_in_norm)
         return feature_in_norm
 
-    def forward(self, pred, target, feature_centering=True, chunk_size=256):
+    def forward(self, pred, target, feature_centering=False, chunk_size=256):
         """
-        Memory-efficient Contextual Loss (SwinTExCo implementation with chunking)
+        Memory-efficient Contextual Loss (Simplified stable version)
 
         Args:
             pred: [B, 2, H, W] predicted AB channels
             target: [B, 2, H, W] ground truth AB channels
-            feature_centering: Whether to subtract mean (default: True)
+            feature_centering: Whether to subtract mean (default: False for stability)
             chunk_size: Process features in chunks to save memory (default: 256)
-                       For 224x224 images (50176 pixels), chunk_size=256 reduces
-                       memory from ~10GB to ~100MB per batch
 
         Returns:
             loss: scalar (averaged over batch)
@@ -121,58 +119,43 @@ class ContextualLoss(nn.Module):
         batch_size = pred.shape[0]
         feature_depth = pred.shape[1]
 
-        # Convert to feature vectors
-        X_features = pred  # [B, 2, H, W]
-        Y_features = target  # [B, 2, H, W]
+        # Flatten spatial dimensions
+        pred_flat = pred.view(batch_size, feature_depth, -1)  # [B, 2, H*W]
+        target_flat = target.view(batch_size, feature_depth, -1)
 
-        # Feature centering (subtract mean from target features)
-        if feature_centering:
-            Y_mean = Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
-            X_features = X_features - Y_mean
-            Y_features = Y_features - Y_mean
-
-        # Normalize features (L2 normalization)
-        X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
-        Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
-
-        X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, 2]
-
-        N = X_features_permute.shape[1]  # H*W
+        # L2 normalization (more stable than feature centering + normalize)
+        pred_norm = F.normalize(pred_flat, dim=1, eps=1e-8)
+        target_norm = F.normalize(target_flat, dim=1, eps=1e-8)
 
         # Process in chunks to save memory
         CX_list = []
 
         for b in range(batch_size):
-            # Process each sample in batch separately
-            X_b = X_features_permute[b]  # [H*W, 2]
-            Y_b = Y_features[b]  # [2, H*W]
+            pred_b = pred_norm[b]  # [2, H*W]
+            target_b = target_norm[b]  # [2, H*W]
 
+            N = pred_b.shape[1]  # H*W
             cx_values = []
 
             # Split into chunks
             for i in range(0, N, chunk_size):
                 end_i = min(i + chunk_size, N)
-                X_chunk = X_b[i:end_i]  # [chunk, 2]
+                pred_chunk = pred_b[:, i:end_i]  # [2, chunk]
 
-                # Cosine distance for this chunk
-                d_chunk = 1 - torch.matmul(X_chunk, Y_b)  # [chunk, H*W]
+                # Cosine similarity (not distance)
+                similarity = torch.matmul(pred_chunk.t(), target_b)  # [chunk, H*W]
 
-                # Normalized distance
-                d_min = torch.min(d_chunk, dim=-1, keepdim=True)[0]
-                d_norm_chunk = d_chunk / (d_min + 1e-5)
+                # Clamp to valid range [-1, 1] for numerical stability
+                similarity = torch.clamp(similarity, -1.0, 1.0)
 
-                # Pairwise affinity using exponential kernel
-                w_chunk = torch.exp((1 - d_norm_chunk) / self.h)
-                A_ij_chunk = w_chunk / torch.sum(w_chunk, dim=-1, keepdim=True)
+                # Max similarity for this chunk
+                cx_chunk = torch.max(similarity, dim=1)[0]  # [chunk]
 
-                # Max affinity for this chunk
-                cx_chunk = torch.max(A_ij_chunk, dim=1)[0]  # [chunk]
+                # Clamp to avoid log(0)
+                cx_chunk = torch.clamp(cx_chunk, min=1e-6, max=1.0)
                 cx_values.append(cx_chunk)
 
-                # Free memory
-                del d_chunk, d_norm_chunk, w_chunk, A_ij_chunk
-
-            # Concatenate all chunks for this sample
+            # Concatenate all chunks
             CX_b = torch.cat(cx_values, dim=0)  # [H*W]
             CX_list.append(torch.mean(CX_b))
 
@@ -180,7 +163,8 @@ class ContextualLoss(nn.Module):
         CX = torch.stack(CX_list)  # [B]
 
         # Contextual loss (negative log)
-        loss = -torch.log(CX + 1e-5)  # [B]
+        # CX is in [1e-6, 1], so -log(CX) is in [0, ~14]
+        loss = -torch.log(CX)  # [B]
 
         # Average over batch
         return loss.mean()
