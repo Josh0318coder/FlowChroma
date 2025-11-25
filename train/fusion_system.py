@@ -243,12 +243,12 @@ class FusionSystem(nn.Module):
             target_pil: PIL Image (RGB)
 
         Returns:
-            swintexco_lab: [B, 3, H, W] - Complete LAB (L from target + predicted AB)
+            swintexco_ab: [B, 2, H, W] (normalized to [-1, 1])
             similarity_map: [B, 1, H, W]
 
         Note:
             This requires SwinTExCo to be modified to return similarity_map.
-            SwinTExCo only predicts AB channels, we combine with target L channel.
+            See fusion/README.md for required modifications.
         """
         # Disable autocast for SwinTExCo (not compatible with mixed precision)
         # Note: Do NOT use torch.no_grad() here during training, as SwinTExCo is trainable
@@ -264,6 +264,7 @@ class FusionSystem(nn.Module):
             features_B = self.swintexco.embed_net(ref_rgb)
 
             # Process target and get prediction with similarity_map
+            # Note: This calls the modified __proccess_sample that returns similarity_map
             target_lab = self.swintexco.processor(target_pil).unsqueeze(0).to(self.device)
             target_l = target_lab[:, 0:1, :, :]
 
@@ -281,10 +282,7 @@ class FusionSystem(nn.Module):
                 joint_training=True  # Changed to True to enable gradients during training
             )
 
-            # Combine target L with predicted AB to form complete LAB
-            swintexco_lab = torch.cat([target_l, ab_predict], dim=1)
-
-        return swintexco_lab, similarity_map
+        return ab_predict, similarity_map
 
     def forward_sequence(self, frames_lab, frames_pil, references_pil):
         """
@@ -362,16 +360,13 @@ class FusionSystem(nn.Module):
             memflow_lab, memflow_conf = self.memflow_inference(frame_t, frame_t1)
 
         # 2. SwinTExCo inference (always valid)
-        swintexco_lab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
-
-        # Extract AB channels from SwinTExCo LAB for FusionNet
-        swintexco_ab = swintexco_lab[:, 1:3, :, :]
+        swintexco_ab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
 
         # 3. Fusion UNet inference (trainable)
         fused_lab = self.fusion_unet(
             memflow_lab,
             memflow_conf,
-            swintexco_ab,
+            swintexco_ab,  # 直接使用 AB，因为您的版本已经返回 AB 了
             swintexco_sim,
             L_channel
         )
