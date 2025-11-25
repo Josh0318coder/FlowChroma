@@ -212,6 +212,7 @@ def main():
         lambda_contextual=0.1,
         lambda_temporal=0.5,
         use_temporal=True,
+        contextual_chunk_size=args.contextual_chunk_size,
         device=args.device
     )
 

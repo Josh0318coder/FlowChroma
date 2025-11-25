@@ -245,6 +245,7 @@ class FusionLoss(nn.Module):
                  lambda_contextual=0.1,
                  lambda_temporal=0.5,
                  use_temporal=True,
+                 contextual_chunk_size=256,
                  device='cuda'):
         super().__init__()
 
@@ -252,6 +253,7 @@ class FusionLoss(nn.Module):
         self.lambda_perceptual = lambda_perceptual
         self.lambda_contextual = lambda_contextual
         self.lambda_temporal = lambda_temporal
+        self.contextual_chunk_size = contextual_chunk_size
         self.use_temporal = use_temporal
 
         # Loss components
@@ -296,7 +298,10 @@ class FusionLoss(nn.Module):
 
         # Contextual Loss (only compute if weight > 0 to save memory)
         if self.lambda_contextual > 0:
-            loss_contextual = self.contextual_loss(pred_ab, gt_ab)
+            loss_contextual = self.contextual_loss(
+                pred_ab, gt_ab,
+                chunk_size=self.contextual_chunk_size
+            )
             total_loss += self.lambda_contextual * loss_contextual
             loss_dict['contextual'] = loss_contextual.item()
         else:
