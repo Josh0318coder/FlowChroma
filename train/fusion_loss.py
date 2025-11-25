@@ -103,41 +103,56 @@ class ContextualLoss(nn.Module):
         feature_in_norm = torch.div(feature_in, feature_in_norm)
         return feature_in_norm
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, feature_centering=True):
         """
-        Simplified Contextual Loss using cosine similarity
+        Standard Contextual Loss (SwinTExCo implementation without chunking)
 
         Args:
             pred: [B, 2, H, W] predicted AB channels
             target: [B, 2, H, W] ground truth AB channels
+            feature_centering: Whether to subtract mean (default: True)
 
         Returns:
-            loss: scalar
+            loss: scalar (averaged over batch)
         """
-        # Flatten spatial dimensions
-        pred_flat = pred.flatten(2)  # [B, 2, H*W]
-        target_flat = target.flatten(2)  # [B, 2, H*W]
+        batch_size = pred.shape[0]
+        feature_depth = pred.shape[1]
 
-        # Normalize (with eps for numerical stability)
-        pred_norm = F.normalize(pred_flat, dim=1, eps=1e-8)
-        target_norm = F.normalize(target_flat, dim=1, eps=1e-8)
+        # Convert to feature vectors
+        X_features = pred  # [B, 2, H, W]
+        Y_features = target  # [B, 2, H, W]
 
-        # Cosine similarity matrix
-        similarity = torch.bmm(pred_norm.transpose(1, 2), target_norm)  # [B, H*W, H*W]
+        # Feature centering (subtract mean from target features)
+        if feature_centering:
+            Y_mean = Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
+            X_features = X_features - Y_mean
+            Y_features = Y_features - Y_mean
 
-        # Clamp for numerical stability
-        similarity = torch.clamp(similarity, -1.0, 1.0)
+        # Normalize features (L2 normalization)
+        X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
+        Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
 
-        # Contextual similarity (max over target features)
-        cx = torch.max(similarity, dim=2)[0]  # [B, H*W]
+        # Cosine distance = 1 - similarity
+        X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, 2]
+        d = 1 - torch.matmul(X_features_permute, Y_features)  # [B, H*W, H*W]
 
-        # Clamp to avoid log(0)
-        cx = torch.clamp(cx, min=1e-6, max=1.0)
+        # Normalized distance: d_ij / min(d_i)
+        # This emphasizes relative matching quality
+        d_norm = d / (torch.min(d, dim=-1, keepdim=True)[0] + 1e-5)  # [B, H*W, H*W]
+
+        # Pairwise affinity using exponential kernel
+        w = torch.exp((1 - d_norm) / self.h)  # [B, H*W, H*W]
+        A_ij = w / torch.sum(w, dim=-1, keepdim=True)  # Softmax normalization
+
+        # Contextual similarity per sample
+        # For each position in pred, find best match in target
+        CX = torch.mean(torch.max(A_ij, dim=1)[0], dim=-1)  # [B]
 
         # Contextual loss (negative log)
-        loss = -torch.log(cx).mean()
+        loss = -torch.log(CX + 1e-5)  # [B]
 
-        return loss
+        # Average over batch
+        return loss.mean()
 
 
 class TemporalLoss(nn.Module):
