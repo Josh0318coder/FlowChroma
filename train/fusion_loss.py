@@ -103,71 +103,41 @@ class ContextualLoss(nn.Module):
         feature_in_norm = torch.div(feature_in, feature_in_norm)
         return feature_in_norm
 
-    def forward(self, pred, target, feature_centering=False, chunk_size=256):
+    def forward(self, pred, target):
         """
-        Memory-efficient Contextual Loss (Simplified stable version)
+        Simplified Contextual Loss using cosine similarity
 
         Args:
             pred: [B, 2, H, W] predicted AB channels
             target: [B, 2, H, W] ground truth AB channels
-            feature_centering: Whether to subtract mean (default: False for stability)
-            chunk_size: Process features in chunks to save memory (default: 256)
 
         Returns:
-            loss: scalar (averaged over batch)
+            loss: scalar
         """
-        batch_size = pred.shape[0]
-        feature_depth = pred.shape[1]
-
         # Flatten spatial dimensions
-        pred_flat = pred.view(batch_size, feature_depth, -1)  # [B, 2, H*W]
-        target_flat = target.view(batch_size, feature_depth, -1)
+        pred_flat = pred.flatten(2)  # [B, 2, H*W]
+        target_flat = target.flatten(2)  # [B, 2, H*W]
 
-        # L2 normalization (more stable than feature centering + normalize)
+        # Normalize (with eps for numerical stability)
         pred_norm = F.normalize(pred_flat, dim=1, eps=1e-8)
         target_norm = F.normalize(target_flat, dim=1, eps=1e-8)
 
-        # Process in chunks to save memory
-        CX_list = []
+        # Cosine similarity matrix
+        similarity = torch.bmm(pred_norm.transpose(1, 2), target_norm)  # [B, H*W, H*W]
 
-        for b in range(batch_size):
-            pred_b = pred_norm[b]  # [2, H*W]
-            target_b = target_norm[b]  # [2, H*W]
+        # Clamp for numerical stability
+        similarity = torch.clamp(similarity, -1.0, 1.0)
 
-            N = pred_b.shape[1]  # H*W
-            cx_values = []
+        # Contextual similarity (max over target features)
+        cx = torch.max(similarity, dim=2)[0]  # [B, H*W]
 
-            # Split into chunks
-            for i in range(0, N, chunk_size):
-                end_i = min(i + chunk_size, N)
-                pred_chunk = pred_b[:, i:end_i]  # [2, chunk]
-
-                # Cosine similarity (not distance)
-                similarity = torch.matmul(pred_chunk.t(), target_b)  # [chunk, H*W]
-
-                # Clamp to valid range [-1, 1] for numerical stability
-                similarity = torch.clamp(similarity, -1.0, 1.0)
-
-                # Max similarity for this chunk
-                cx_chunk = torch.max(similarity, dim=1)[0]  # [chunk]
-
-                # Clamp to avoid log(0)
-                cx_chunk = torch.clamp(cx_chunk, min=1e-6, max=1.0)
-                cx_values.append(cx_chunk)
-
-            # Concatenate all chunks
-            CX_b = torch.cat(cx_values, dim=0)  # [H*W]
-            CX_list.append(torch.mean(CX_b))
-
-        # Stack batch results
-        CX = torch.stack(CX_list)  # [B]
+        # Clamp to avoid log(0)
+        cx = torch.clamp(cx, min=1e-6, max=1.0)
 
         # Contextual loss (negative log)
-        # CX is in [1e-6, 1], so -log(CX) is in [0, ~14]
-        loss = -torch.log(CX)  # [B]
+        loss = -torch.log(cx).mean()
 
-        # Average over batch
-        return loss.mean()
+        return loss
 
 
 class TemporalLoss(nn.Module):
@@ -282,10 +252,7 @@ class FusionLoss(nn.Module):
 
         # Contextual Loss (only compute if weight > 0 to save memory)
         if self.lambda_contextual > 0:
-            loss_contextual = self.contextual_loss(
-                pred_ab, gt_ab,
-                chunk_size=self.contextual_chunk_size
-            )
+            loss_contextual = self.contextual_loss(pred_ab, gt_ab)
             total_loss += self.lambda_contextual * loss_contextual
             loss_dict['contextual'] = loss_contextual.item()
         else:
