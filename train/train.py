@@ -74,6 +74,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
 
                 # Compute loss for each frame in the sequence
                 frame_losses = []
+                frame_loss_dicts = []  # Collect all loss dicts
                 for i, (output_lab, gt_lab) in enumerate(zip(outputs, frames_lab)):
                     # Extract AB channels for loss computation
                     output_ab = output_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
@@ -98,6 +99,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                         embed_net=embed_net
                     )
                     frame_losses.append(loss)
+                    frame_loss_dicts.append(loss_dict)
 
                 # Average loss over 4 frames
                 seq_loss = sum(frame_losses) / len(frame_losses)
@@ -123,20 +125,22 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
             scaler.update()
             optimizer.zero_grad()
 
-        # Accumulate losses (use last frame's loss_dict for display)
+        # Accumulate losses (average across all frames in the sequence)
         epoch_losses['total'] += batch_loss.item()
-        if loss_dict:
+        if frame_loss_dicts:
+            # Average loss components across all frames
             for key in ['l1', 'perceptual', 'contextual', 'temporal']:
-                if key in loss_dict:
-                    epoch_losses[key] += loss_dict[key]
+                frame_values = [d[key] for d in frame_loss_dicts if key in d]
+                if frame_values:
+                    epoch_losses[key] += sum(frame_values) / len(frame_values)
 
         total_sequences += batch_size
 
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': batch_loss.item(),
-            'seqs': total_sequences
-        })
+        # Update progress bar with contextual loss from frame 0
+        postfix_dict = {'loss': batch_loss.item(), 'seqs': total_sequences}
+        if frame_loss_dicts and 'contextual' in frame_loss_dicts[0]:
+            postfix_dict['ctx'] = frame_loss_dicts[0]['contextual']  # Frame 0's contextual loss
+        pbar.set_postfix(postfix_dict)
 
     # Average losses
     num_batches = len(dataloader)
