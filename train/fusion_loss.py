@@ -254,9 +254,13 @@ class SwinContextualLoss(nn.Module):
             pred_rgb = tensor_lab2rgb(torch.cat([pred_l, pred_ab], dim=1).float())
             gt_rgb = tensor_lab2rgb(torch.cat([gt_l, gt_ab], dim=1).float())
 
-        # Extract Swin features (embed_net is frozen, so use no_grad)
+        # Extract Swin features
+        # Note: embed_net is frozen (requires_grad=False, eval mode), but we DON'T use no_grad()
+        # to allow gradients to flow back to pred_rgb (following SwinTExCo paper)
+        pred_features = embed_net(pred_rgb)  # [feat_0, feat_1, feat_2, feat_3]
+
+        # GT features can use no_grad since we don't need gradients for ground truth
         with torch.no_grad():
-            pred_features = embed_net(pred_rgb)  # [feat_0, feat_1, feat_2, feat_3]
             gt_features = embed_net(gt_rgb)      # [feat_0, feat_1, feat_2, feat_3]
 
         # Multi-scale contextual loss (following SwinTExCo paper)
