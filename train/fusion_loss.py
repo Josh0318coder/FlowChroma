@@ -266,8 +266,14 @@ class SwinContextualLoss(nn.Module):
         # DEBUG: Print values to diagnose fixed loss issue
         if torch.rand(1).item() < 0.01:  # Print 1% of the time to avoid spam
             print(f"\n[DEBUG Contextual Loss]")
+            print(f"  pred_lab L: mean={pred_lab[:, 0, :, :].mean().item():.4f}, std={pred_lab[:, 0, :, :].std().item():.4f}")
+            print(f"  gt_lab L:   mean={gt_lab[:, 0, :, :].mean().item():.4f}, std={gt_lab[:, 0, :, :].std().item():.4f}")
+            print(f"  pred_lab AB: mean={pred_lab[:, 1:, :, :].mean().item():.4f}, std={pred_lab[:, 1:, :, :].std().item():.4f}")
+            print(f"  gt_lab AB:   mean={gt_lab[:, 1:, :, :].mean().item():.4f}, std={gt_lab[:, 1:, :, :].std().item():.4f}")
+            print(f"  AB diff (L1): {torch.abs(pred_lab[:, 1:, :, :] - gt_lab[:, 1:, :, :]).mean().item():.4f}")
             print(f"  pred_rgb: mean={pred_rgb.mean().item():.4f}, std={pred_rgb.std().item():.4f}")
             print(f"  gt_rgb: mean={gt_rgb.mean().item():.4f}, std={gt_rgb.std().item():.4f}")
+            print(f"  RGB diff (L1): {torch.abs(pred_rgb - gt_rgb).mean().item():.6f}")
             print(f"  pred_feat[0]: mean={pred_features[0].mean().item():.4f}, std={pred_features[0].std().item():.4f}")
             print(f"  gt_feat[0]: mean={gt_features[0].mean().item():.4f}, std={gt_features[0].std().item():.4f}")
 
