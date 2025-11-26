@@ -229,7 +229,7 @@ def main():
     criterion = FusionLoss(
         lambda_l1=1.0,
         lambda_perceptual=0.05,
-        lambda_contextual=0.0,  # Disabled to save memory
+        lambda_contextual=0.015,  # SwinTExCo paper value (only computed on frame 0)
         lambda_temporal=0.5,
         use_temporal=True,
         contextual_chunk_size=args.contextual_chunk_size,
