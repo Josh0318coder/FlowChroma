@@ -390,8 +390,8 @@ class FusionLoss(nn.Module):
         )
 
         loss_dict = {
-            'l1': loss_l1.item(),
-            'perceptual': loss_perceptual.item(),
+            'l1': (self.lambda_l1 * loss_l1).item(),
+            'perceptual': (self.lambda_perceptual * loss_perceptual).item(),
         }
 
         # Contextual Loss (only compute on frame 0 to save memory)
@@ -401,12 +401,12 @@ class FusionLoss(nn.Module):
                     # Swin-based contextual loss (multi-scale, following SwinTExCo paper)
                     loss_contextual = self.swin_contextual_loss(pred_lab, gt_lab, embed_net)
                     total_loss += self.lambda_contextual * loss_contextual
-                    loss_dict['contextual'] = loss_contextual.item()
+                    loss_dict['contextual'] = (self.lambda_contextual * loss_contextual).item()
                 else:
                     # Fallback to AB-based contextual loss
                     loss_contextual = self.contextual_loss(pred_ab, gt_ab)
                     total_loss += self.lambda_contextual * loss_contextual
-                    loss_dict['contextual'] = loss_contextual.item()
+                    loss_dict['contextual'] = (self.lambda_contextual * loss_contextual).item()
             else:
                 # Skip contextual loss for frame 1, 2, 3
                 loss_dict['contextual'] = 0.0
@@ -417,7 +417,7 @@ class FusionLoss(nn.Module):
         if self.use_temporal and flow is not None and prev_pred_ab is not None:
             loss_temporal = self.temporal_loss(prev_pred_ab, pred_ab, flow, mask)
             total_loss += self.lambda_temporal * loss_temporal
-            loss_dict['temporal'] = loss_temporal.item()
+            loss_dict['temporal'] = (self.lambda_temporal * loss_temporal).item()
 
         loss_dict['total'] = total_loss.item()
 
