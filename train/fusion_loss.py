@@ -241,13 +241,17 @@ class SwinContextualLoss(nn.Module):
         # Convert LAB to RGB for Swin feature extraction
         from src.utils import uncenter_l, tensor_lab2rgb
 
+        # Force float32 for tensor_lab2rgb (not compatible with AMP FP16)
+        pred_lab_fp32 = pred_lab.float()
+        gt_lab_fp32 = gt_lab.float()
+
         # Uncenter L channel (from [-1, 1] to [0, 1])
-        pred_l = uncenter_l(pred_lab[:, 0:1, :, :])
-        pred_ab = pred_lab[:, 1:3, :, :]
+        pred_l = uncenter_l(pred_lab_fp32[:, 0:1, :, :])
+        pred_ab = pred_lab_fp32[:, 1:3, :, :]
         pred_rgb = tensor_lab2rgb(torch.cat([pred_l, pred_ab], dim=1))
 
-        gt_l = uncenter_l(gt_lab[:, 0:1, :, :])
-        gt_ab = gt_lab[:, 1:3, :, :]
+        gt_l = uncenter_l(gt_lab_fp32[:, 0:1, :, :])
+        gt_ab = gt_lab_fp32[:, 1:3, :, :]
         gt_rgb = tensor_lab2rgb(torch.cat([gt_l, gt_ab], dim=1))
 
         # Extract Swin features (embed_net is frozen, so use no_grad)
