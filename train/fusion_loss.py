@@ -322,13 +322,13 @@ class FusionLoss(nn.Module):
     Weights:
         - L1: 1.0 (baseline)
         - Perceptual: 0.05
-        - Contextual (Swin): 0.5 (SwinTExCo paper, only on frame 0)
+        - Contextual (Swin): 0.015 (SwinTExCo paper, only on frame 0)
         - Temporal: 0.5 (if used)
     """
     def __init__(self,
                  lambda_l1=1.0,
                  lambda_perceptual=0.05,
-                 lambda_contextual=0.5,  # Changed to 0.5 following SwinTExCo paper
+                 lambda_contextual=0.015,  # SwinTExCo paper uses 0.015, not 0.5!
                  lambda_temporal=0.5,
                  use_temporal=True,
                  use_swin_contextual=True,  # Use Swin-based contextual loss
