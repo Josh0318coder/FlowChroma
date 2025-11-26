@@ -263,12 +263,25 @@ class SwinContextualLoss(nn.Module):
         with torch.no_grad():
             gt_features = embed_net(gt_rgb)      # [feat_0, feat_1, feat_2, feat_3]
 
+        # DEBUG: Print values to diagnose fixed loss issue
+        if torch.rand(1).item() < 0.01:  # Print 1% of the time to avoid spam
+            print(f"\n[DEBUG Contextual Loss]")
+            print(f"  pred_rgb: mean={pred_rgb.mean().item():.4f}, std={pred_rgb.std().item():.4f}")
+            print(f"  gt_rgb: mean={gt_rgb.mean().item():.4f}, std={gt_rgb.std().item():.4f}")
+            print(f"  pred_feat[0]: mean={pred_features[0].mean().item():.4f}, std={pred_features[0].std().item():.4f}")
+            print(f"  gt_feat[0]: mean={gt_features[0].mean().item():.4f}, std={gt_features[0].std().item():.4f}")
+
         # Multi-scale contextual loss (following SwinTExCo paper)
         # Weights: 1x, 2x, 4x, 8x for layers 0, 1, 2, 3
         loss_feat_0 = self._compute_contextual_on_features(pred_features[0], gt_features[0]) * 1
         loss_feat_1 = self._compute_contextual_on_features(pred_features[1], gt_features[1]) * 2
         loss_feat_2 = self._compute_contextual_on_features(pred_features[2], gt_features[2]) * 4
         loss_feat_3 = self._compute_contextual_on_features(pred_features[3], gt_features[3]) * 8
+
+        # DEBUG: Print individual losses
+        if torch.rand(1).item() < 0.01:
+            print(f"  loss_0={loss_feat_0.item():.4f}, loss_1={loss_feat_1.item():.4f}")
+            print(f"  loss_2={loss_feat_2.item():.4f}, loss_3={loss_feat_3.item():.4f}")
 
         # Total contextual loss (sum of weighted losses)
         total_loss = loss_feat_0 + loss_feat_1 + loss_feat_2 + loss_feat_3
