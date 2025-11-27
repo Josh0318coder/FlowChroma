@@ -86,7 +86,8 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                         output_lab_batch = output_lab.unsqueeze(0)  # [1, 3, H, W]
 
                         # Convert reference PIL to LAB tensor
-                        reference_lab_batch = system.swintexco.processor(references_pil[seq_idx][i]).unsqueeze(0).to(args.device)
+                        # references_pil is already a list of 4 PIL images for this sequence
+                        reference_lab_batch = system.swintexco.processor(references_pil[i]).unsqueeze(0).to(args.device)
 
                         embed_net = system.swintexco.embed_net
                     else:
