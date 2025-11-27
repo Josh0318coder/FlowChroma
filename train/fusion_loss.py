@@ -373,11 +373,9 @@ class FusionLoss(nn.Module):
         self.l1_loss = nn.L1Loss()
         self.perceptual_loss = PerceptualLoss(device=device)
 
-        # Contextual loss: use Swin-based or AB-based
-        if use_swin_contextual:
-            self.swin_contextual_loss = SwinContextualLoss(device=device)
-        else:
-            self.contextual_loss = ContextualLoss(device=device)
+        # Contextual loss: always initialize both for fallback support
+        self.swin_contextual_loss = SwinContextualLoss(device=device)
+        self.contextual_loss = ContextualLoss(device=device)  # Fallback for AB-based
 
         if use_temporal:
             self.temporal_loss = TemporalLoss()
