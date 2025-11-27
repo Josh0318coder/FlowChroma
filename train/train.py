@@ -29,20 +29,30 @@ sys.path.insert(0, '.')
 
 from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import FusionNetV1
-from train.fusion_loss import FusionLoss
+from train.fusion_loss import FusionLoss, generator_loss_fn, discriminator_loss_fn
 from train.fusion_dataset import FusionSequenceDataset, fusion_sequence_collate_fn
 
+# Import discriminator for adversarial training
+sys.path.insert(0, './SwinSingle/src/models/CNN')
+from GAN_models import Discriminator_x64_224
 
-def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
+
+def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args,
+                discriminator=None, optimizer_d=None):
     """Train for one epoch with 4-frame sequences"""
 
     system.train()
+    if discriminator is not None:
+        discriminator.train()
+
     epoch_losses = {
         'total': 0.0,
         'l1': 0.0,
         'perceptual': 0.0,
         'contextual': 0.0,
-        'temporal': 0.0
+        'temporal': 0.0,
+        'discriminator': 0.0,
+        'generator': 0.0
     }
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
@@ -108,6 +118,44 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
 
                 # Average loss over 4 frames
                 seq_loss = sum(frame_losses) / len(frame_losses)
+
+                # ==================== GAN Training ====================
+                # Train discriminator on frame 0 only (to save memory/computation)
+                discriminator_loss_total = torch.tensor(0.0, device=args.device)
+                generator_loss_total = torch.tensor(0.0, device=args.device)
+
+                if discriminator is not None and args.weight_gan > 0:
+                    # Use frame 0 for GAN training
+                    output_lab_frame0 = outputs[0]  # [3, H, W]
+                    gt_lab_frame0 = frames_lab[0]   # [3, H, W]
+
+                    # Build LAB images: concat(L, AB) -> [1, 3, H, W]
+                    # Note: LAB is already in normalized form from system output
+                    fake_data_lab = output_lab_frame0.unsqueeze(0)  # [1, 3, H, W]
+                    real_data_lab = gt_lab_frame0.unsqueeze(0)      # [1, 3, H, W]
+
+                    # Optional: permute real data batch
+                    if args.permute_data and fake_data_lab.size(0) > 1:
+                        batch_index = torch.arange(-1, fake_data_lab.size(0) - 1, dtype=torch.long)
+                        real_data_lab = real_data_lab[batch_index, ...]
+
+                    # Discriminator training (every iteration)
+                    discriminator_loss_total = discriminator_loss_fn(
+                        real_data_lab, fake_data_lab, discriminator
+                    )
+                    discriminator_loss_total.backward()
+                    optimizer_d.step()
+                    optimizer_d.zero_grad()
+
+                    # Generator loss (only after epoch_train_discriminator)
+                    if epoch > args.epoch_train_discriminator:
+                        generator_loss_total = generator_loss_fn(
+                            real_data_lab, fake_data_lab, discriminator,
+                            args.weight_gan, args.device
+                        )
+                        # Add generator loss to sequence loss
+                        seq_loss = seq_loss + generator_loss_total / args.accumulation_steps
+
                 sequence_losses.append(seq_loss)
 
         # Average loss over batch
@@ -139,12 +187,21 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                 if frame_values:
                     epoch_losses[key] += sum(frame_values) / len(frame_values)
 
+        # Accumulate GAN losses
+        epoch_losses['discriminator'] += discriminator_loss_total.item()
+        if epoch > args.epoch_train_discriminator:
+            epoch_losses['generator'] += generator_loss_total.item()
+
         total_sequences += batch_size
 
-        # Update progress bar with contextual loss from frame 0
+        # Update progress bar with contextual loss and GAN losses
         postfix_dict = {'loss': batch_loss.item(), 'seqs': total_sequences}
         if frame_loss_dicts and 'contextual' in frame_loss_dicts[0]:
             postfix_dict['ctx'] = frame_loss_dicts[0]['contextual']  # Frame 0's contextual loss
+        if discriminator is not None and args.weight_gan > 0:
+            postfix_dict['D'] = discriminator_loss_total.item()
+            if epoch > args.epoch_train_discriminator:
+                postfix_dict['G'] = generator_loss_total.item()
         pbar.set_postfix(postfix_dict)
 
     # Average losses
@@ -199,6 +256,14 @@ def main():
                         help='Freeze SwinTExCo (only train FusionNet) to save memory')
     parser.add_argument('--contextual_chunk_size', type=int, default=256,
                         help='Chunk size for Contextual Loss (default: 256). Use 64 or 128 for less memory')
+
+    # Adversarial Training (GAN)
+    parser.add_argument('--weight_gan', type=float, default=0.015,
+                        help='Weight for adversarial loss (default: 0.015 from SwinTExCo paper)')
+    parser.add_argument('--epoch_train_discriminator', type=int, default=3,
+                        help='Number of epochs to train discriminator before adding generator loss (default: 3)')
+    parser.add_argument('--permute_data', action='store_true',
+                        help='Permute real data batch for discriminator training')
 
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='ckpts/FusionNet',
@@ -267,9 +332,29 @@ def main():
     print(f"{'Total Trainable':30s}: {total_params:>15,d} parameters")
     print("="*80 + "\n")
 
+    # Discriminator for adversarial training
+    print("Initializing Discriminator for adversarial training...")
+    discriminator = Discriminator_x64_224(ndf=64).to(args.device)
+    discriminator_params = sum(p.numel() for p in discriminator.parameters())
+    print(f"{'Discriminator':30s}: {discriminator_params:>15,d} parameters\n")
+
+    # Optimizer for discriminator
+    optimizer_d = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, discriminator.parameters()),
+        lr=args.lr_fusion,  # Use same LR as FusionNet
+        betas=(0.5, 0.999),
+        weight_decay=1e-4
+    )
+
     # Scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
+        T_max=args.epochs,
+        eta_min=1e-6
+    )
+
+    scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer_d,
         T_max=args.epochs,
         eta_min=1e-6
     )
@@ -313,7 +398,8 @@ def main():
     for epoch in range(1, args.epochs + 1):
         # Train
         train_losses = train_epoch(
-            system, train_loader, criterion, optimizer, scaler, epoch, args
+            system, train_loader, criterion, optimizer, scaler, epoch, args,
+            discriminator=discriminator, optimizer_d=optimizer_d
         )
 
         # Print
@@ -324,10 +410,16 @@ def main():
         print(f"    - Contextual: {train_losses['contextual']:.4f}")
         if train_losses['temporal'] > 0:
             print(f"    - Temporal: {train_losses['temporal']:.4f}")
+        if args.weight_gan > 0:
+            print(f"    - Discriminator: {train_losses['discriminator']:.4f}")
+            if epoch > args.epoch_train_discriminator:
+                print(f"    - Generator: {train_losses['generator']:.4f}")
 
         # Learning rate
         scheduler.step()
-        print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+        scheduler_d.step()
+        print(f"  Learning Rate (G): {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"  Learning Rate (D): {optimizer_d.param_groups[0]['lr']:.6f}")
 
         # Save checkpoint
         if epoch % args.save_freq == 0 or train_losses['total'] < best_loss:
@@ -340,8 +432,11 @@ def main():
                 'swintexco_embed': system.swintexco.embed_net.state_dict(),
                 'swintexco_nonlocal': system.swintexco.nonlocal_net.state_dict(),
                 'swintexco_colornet': system.swintexco.colornet.state_dict(),
+                'discriminator': discriminator.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'optimizer_d': optimizer_d.state_dict(),
                 'scheduler': scheduler.state_dict(),
+                'scheduler_d': scheduler_d.state_dict(),
                 'best_loss': best_loss,
                 'train_losses': train_losses
             }
