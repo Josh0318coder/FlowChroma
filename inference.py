@@ -196,8 +196,16 @@ def process_scene(system, scene_path, output_scene_path, target_size=(224, 224))
                     is_first=True
                 )
             else:
-                # Subsequent frames: use previous frame
-                frame_t_batch = frames_lab[i-1].unsqueeze(0).to(system.device)
+                # Subsequent frames: use PREVIOUS PREDICTION (not GT)
+                # This enables error accumulation (like real inference should be)
+
+                # Get previous frame's prediction (already in LAB format)
+                prev_output_lab = colorized_frames[-1]  # This is PIL RGB
+
+                # Convert RGB back to LAB tensor
+                prev_output_lab_tensor = rgb_to_lab_tensor(prev_output_lab, target_size)
+                frame_t_batch = prev_output_lab_tensor.unsqueeze(0).to(system.device)
+
                 output_lab = system.forward_single_frame(
                     frame_t_batch,
                     frame_t1_batch,
