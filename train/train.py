@@ -80,14 +80,18 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                     output_ab = output_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
                     gt_ab = gt_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
 
-                    # Prepare LAB for Swin Contextual Loss (only needed for frame 0)
+                    # Prepare for Swin Contextual Loss (only needed for frame 0)
+                    # Contextual loss: style matching between pred and reference image
                     if i == 0:
                         output_lab_batch = output_lab.unsqueeze(0)  # [1, 3, H, W]
-                        gt_lab_batch = gt_lab.unsqueeze(0)  # [1, 3, H, W]
+
+                        # Convert reference PIL to LAB tensor
+                        reference_lab_batch = system.swintexco.processor(references_pil[seq_idx][i]).unsqueeze(0).to(args.device)
+
                         embed_net = system.swintexco.embed_net
                     else:
                         output_lab_batch = None
-                        gt_lab_batch = None
+                        reference_lab_batch = None
                         embed_net = None
 
                     # Compute loss with frame index and Swin contextual loss support
@@ -95,7 +99,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                         output_ab, gt_ab,
                         frame_idx=i,
                         pred_lab=output_lab_batch,
-                        gt_lab=gt_lab_batch,
+                        reference_lab=reference_lab_batch,
                         embed_net=embed_net
                     )
                     frame_losses.append(loss)

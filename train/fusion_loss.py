@@ -226,13 +226,16 @@ class SwinContextualLoss(nn.Module):
 
         return loss.mean()
 
-    def forward(self, pred_lab, gt_lab, embed_net):
+    def forward(self, pred_lab, reference_lab, embed_net):
         """
-        Compute Swin Contextual Loss (multi-scale version following SwinTExCo paper)
+        Compute Swin Contextual Loss (style matching following SwinTExCo paper)
+
+        Matches predicted frame to reference image in Swin feature space.
+        This is STYLE MATCHING, not reconstruction.
 
         Args:
             pred_lab: [B, 3, H, W] predicted LAB (normalized to [-1, 1])
-            gt_lab: [B, 3, H, W] ground truth LAB (normalized to [-1, 1])
+            reference_lab: [B, 3, H, W] reference image LAB (normalized to [-1, 1])
             embed_net: Swin Transformer model for feature extraction (frozen)
 
         Returns:
@@ -245,44 +248,43 @@ class SwinContextualLoss(nn.Module):
         pred_l = uncenter_l(pred_lab[:, 0:1, :, :])
         pred_ab = pred_lab[:, 1:3, :, :]
 
-        gt_l = uncenter_l(gt_lab[:, 0:1, :, :])
-        gt_ab = gt_lab[:, 1:3, :, :]
+        ref_l = uncenter_l(reference_lab[:, 0:1, :, :])
+        ref_ab = reference_lab[:, 1:3, :, :]
 
         # Disable autocast for tensor_lab2rgb to prevent FP16/FP32 dtype mismatch
         # SwinTExCo paper doesn't use AMP, so tensor_lab2rgb needs FP32
         with torch.cuda.amp.autocast(enabled=False):
             pred_rgb = tensor_lab2rgb(torch.cat([pred_l, pred_ab], dim=1).float())
-            gt_rgb = tensor_lab2rgb(torch.cat([gt_l, gt_ab], dim=1).float())
+            ref_rgb = tensor_lab2rgb(torch.cat([ref_l, ref_ab], dim=1).float())
 
         # Extract Swin features
         # Note: embed_net is frozen (requires_grad=False, eval mode), but we DON'T use no_grad()
         # to allow gradients to flow back to pred_rgb (following SwinTExCo paper)
         pred_features = embed_net(pred_rgb)  # [feat_0, feat_1, feat_2, feat_3]
 
-        # GT features can use no_grad since we don't need gradients for ground truth
+        # Reference features can use no_grad since we don't need gradients for reference
         with torch.no_grad():
-            gt_features = embed_net(gt_rgb)      # [feat_0, feat_1, feat_2, feat_3]
+            ref_features = embed_net(ref_rgb)      # [feat_0, feat_1, feat_2, feat_3]
 
-        # DEBUG: Print values to diagnose fixed loss issue
+        # DEBUG: Print values to diagnose
         if torch.rand(1).item() < 0.01:  # Print 1% of the time to avoid spam
-            print(f"\n[DEBUG Contextual Loss]")
-            print(f"  pred_lab L: mean={pred_lab[:, 0, :, :].mean().item():.4f}, std={pred_lab[:, 0, :, :].std().item():.4f}")
-            print(f"  gt_lab L:   mean={gt_lab[:, 0, :, :].mean().item():.4f}, std={gt_lab[:, 0, :, :].std().item():.4f}")
+            print(f"\n[DEBUG Contextual Loss - Style Matching]")
             print(f"  pred_lab AB: mean={pred_lab[:, 1:, :, :].mean().item():.4f}, std={pred_lab[:, 1:, :, :].std().item():.4f}")
-            print(f"  gt_lab AB:   mean={gt_lab[:, 1:, :, :].mean().item():.4f}, std={gt_lab[:, 1:, :, :].std().item():.4f}")
-            print(f"  AB diff (L1): {torch.abs(pred_lab[:, 1:, :, :] - gt_lab[:, 1:, :, :]).mean().item():.4f}")
+            print(f"  ref_lab AB:  mean={reference_lab[:, 1:, :, :].mean().item():.4f}, std={reference_lab[:, 1:, :, :].std().item():.4f}")
+            print(f"  AB diff (L1): {torch.abs(pred_lab[:, 1:, :, :] - reference_lab[:, 1:, :, :]).mean().item():.4f}")
             print(f"  pred_rgb: mean={pred_rgb.mean().item():.4f}, std={pred_rgb.std().item():.4f}")
-            print(f"  gt_rgb: mean={gt_rgb.mean().item():.4f}, std={gt_rgb.std().item():.4f}")
-            print(f"  RGB diff (L1): {torch.abs(pred_rgb - gt_rgb).mean().item():.6f}")
+            print(f"  ref_rgb: mean={ref_rgb.mean().item():.4f}, std={ref_rgb.std().item():.4f}")
+            print(f"  RGB diff (L1): {torch.abs(pred_rgb - ref_rgb).mean().item():.6f}")
             print(f"  pred_feat[0]: mean={pred_features[0].mean().item():.4f}, std={pred_features[0].std().item():.4f}")
-            print(f"  gt_feat[0]: mean={gt_features[0].mean().item():.4f}, std={gt_features[0].std().item():.4f}")
+            print(f"  ref_feat[0]: mean={ref_features[0].mean().item():.4f}, std={ref_features[0].std().item():.4f}")
 
         # Multi-scale contextual loss (following SwinTExCo paper)
         # Weights: 1x, 2x, 4x, 8x for layers 0, 1, 2, 3
-        loss_feat_0 = self._compute_contextual_on_features(pred_features[0], gt_features[0]) * 1
-        loss_feat_1 = self._compute_contextual_on_features(pred_features[1], gt_features[1]) * 2
-        loss_feat_2 = self._compute_contextual_on_features(pred_features[2], gt_features[2]) * 4
-        loss_feat_3 = self._compute_contextual_on_features(pred_features[3], gt_features[3]) * 8
+        # Compare pred vs reference (style matching)
+        loss_feat_0 = self._compute_contextual_on_features(pred_features[0], ref_features[0]) * 1
+        loss_feat_1 = self._compute_contextual_on_features(pred_features[1], ref_features[1]) * 2
+        loss_feat_2 = self._compute_contextual_on_features(pred_features[2], ref_features[2]) * 4
+        loss_feat_3 = self._compute_contextual_on_features(pred_features[3], ref_features[3]) * 8
 
         # DEBUG: Print individual losses
         if torch.rand(1).item() < 0.01:
@@ -381,7 +383,7 @@ class FusionLoss(nn.Module):
             self.temporal_loss = TemporalLoss()
 
     def forward(self, pred_ab, gt_ab, flow=None, mask=None, prev_pred_ab=None,
-                frame_idx=None, pred_lab=None, gt_lab=None, embed_net=None):
+                frame_idx=None, pred_lab=None, reference_lab=None, embed_net=None):
         """
         Compute total loss
 
@@ -393,7 +395,7 @@ class FusionLoss(nn.Module):
             prev_pred_ab: [B, 2, H, W] previous frame prediction (for temporal loss)
             frame_idx: int, frame index in sequence (for Swin contextual loss)
             pred_lab: [B, 3, H, W] predicted LAB (for Swin contextual loss)
-            gt_lab: [B, 3, H, W] ground truth LAB (for Swin contextual loss)
+            reference_lab: [B, 3, H, W] reference image LAB (for Swin contextual loss)
             embed_net: Swin model for feature extraction (for Swin contextual loss)
 
         Returns:
@@ -418,11 +420,13 @@ class FusionLoss(nn.Module):
         }
 
         # Contextual Loss (only compute on frame 0 to save memory)
+        # Compares predicted frame to reference image (style matching)
         if self.lambda_contextual > 0 and frame_idx is not None:
             if frame_idx == 0:  # Only compute on first frame
-                if self.use_swin_contextual and pred_lab is not None and gt_lab is not None and embed_net is not None:
+                if self.use_swin_contextual and pred_lab is not None and reference_lab is not None and embed_net is not None:
                     # Swin-based contextual loss (multi-scale, following SwinTExCo paper)
-                    loss_contextual = self.swin_contextual_loss(pred_lab, gt_lab, embed_net)
+                    # Style matching: pred vs reference
+                    loss_contextual = self.swin_contextual_loss(pred_lab, reference_lab, embed_net)
                     total_loss += self.lambda_contextual * loss_contextual
                     loss_dict['contextual'] = (self.lambda_contextual * loss_contextual).item()
                 else:
