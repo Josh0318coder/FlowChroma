@@ -339,8 +339,18 @@ class FusionSystem(nn.Module):
 
                 # After first frame, curr_ti remains -1 (will increment to 0 on next call)
             else:
-                # Subsequent frames: use complete forward pass
-                frame_t_batch = frames_lab[i-1].unsqueeze(0).to(self.device)
+                # Subsequent frames: use PREVIOUS PREDICTION (not GT)
+                # This enables error accumulation training (like real inference)
+
+                # Use previous frame's prediction as input
+                prev_output = results[-1]  # Get previous frame's output
+
+                # Detach to prevent gradient backprop through entire sequence
+                # (saves memory while still training with accumulated errors)
+                frame_t_batch = prev_output.detach().unsqueeze(0)
+
+                # Alternative: Full BPTT (expensive but more accurate)
+                # frame_t_batch = prev_output.unsqueeze(0)  # No detach - gradients flow through
 
                 # Forward pass (curr_ti will be managed automatically)
                 output_lab = self.forward(
