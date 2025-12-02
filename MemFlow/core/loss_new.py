@@ -308,34 +308,44 @@ class ContextualLoss(nn.Module):
     
     def _contextual_loss(self, X_features, Y_features, h=0.1, feature_centering=True):
         """
-        計算contextual loss
+        計算contextual loss (NUMERICALLY STABLE VERSION - prevents NaN from exp overflow)
         """
         batch_size = X_features.shape[0]
         feature_depth = X_features.shape[1]
-        
+
         # Feature centering
         if feature_centering:
             X_features = X_features - Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
             Y_features = Y_features - Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
-        
+
         # Normalize features
         X_features = feature_normalize(X_features).view(batch_size, feature_depth, -1)
         Y_features = feature_normalize(Y_features).view(batch_size, feature_depth, -1)
-        
+
         # Cosine distance = 1 - similarity
         X_features_permute = X_features.permute(0, 2, 1)
         d = 1 - torch.matmul(X_features_permute, Y_features)
-        
-        # Normalized distance
-        d_norm = d / (torch.min(d, dim=-1, keepdim=True)[0] + 1e-5)
-        
-        # Pairwise affinity
-        w = torch.exp((1 - d_norm) / h)
-        A_ij = w / torch.sum(w, dim=-1, keepdim=True)
-        
+
+        # Clamp distance to prevent extreme values
+        d = torch.clamp(d, min=0.0, max=2.0)
+
+        # Normalized distance (with larger epsilon for stability)
+        d_min = torch.min(d, dim=-1, keepdim=True)[0]
+        d_norm = d / (d_min + 1e-3)  # Increased epsilon from 1e-5 to 1e-3
+
+        # Clamp d_norm to prevent extreme exp() inputs
+        d_norm = torch.clamp(d_norm, min=0.0, max=1.0 + 50.0 * h)
+
+        # Pairwise affinity (numerically stable)
+        exp_input = (1 - d_norm) / h
+        exp_input = torch.clamp(exp_input, min=-20.0, max=20.0)
+        w = torch.exp(exp_input)
+        A_ij = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-8)
+
         # Contextual loss per sample
         CX = torch.mean(torch.max(A_ij, dim=1)[0], dim=-1)
-        return -torch.log(CX + 1e-5).mean()
+        CX = torch.clamp(CX, min=1e-6, max=1.0)
+        return -torch.log(CX).mean()
 
 
 # ============== 4. Temporal Consistency Loss ==============

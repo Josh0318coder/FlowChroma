@@ -18,6 +18,7 @@ class ContextualLoss(nn.Module):
         X_features&Y_features are are feature vectors or feature 2d array
         h: bandwidth
         return the per-sample loss
+        NUMERICALLY STABLE VERSION - prevents NaN from exp overflow
         """
         batch_size = X_features.shape[0]
         feature_depth = X_features.shape[1]
@@ -41,15 +42,25 @@ class ContextualLoss(nn.Module):
         X_features_permute = X_features.permute(0, 2, 1)  # batch_size * feature_size^2 * feature_depth
         d = 1 - torch.matmul(X_features_permute, Y_features)  # batch_size * feature_size^2 * feature_size^2
 
-        # normalized distance: dij_bar
-        d_norm = d / (torch.min(d, dim=-1, keepdim=True)[0] + 1e-5)  # batch_size * feature_size^2 * feature_size^2
+        # Clamp distance to prevent extreme values
+        d = torch.clamp(d, min=0.0, max=2.0)
 
-        # pairwise affinity
-        w = torch.exp((1 - d_norm) / h)
-        A_ij = w / torch.sum(w, dim=-1, keepdim=True)
+        # normalized distance: dij_bar (with larger epsilon for stability)
+        d_min = torch.min(d, dim=-1, keepdim=True)[0]
+        d_norm = d / (d_min + 1e-3)  # Increased epsilon from 1e-5 to 1e-3
+
+        # Clamp d_norm to prevent extreme exp() inputs
+        d_norm = torch.clamp(d_norm, min=0.0, max=1.0 + 50.0 * h)
+
+        # pairwise affinity (numerically stable)
+        exp_input = (1 - d_norm) / h
+        exp_input = torch.clamp(exp_input, min=-20.0, max=20.0)
+        w = torch.exp(exp_input)
+        A_ij = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-8)
 
         # contextual loss per sample
         CX = torch.mean(torch.max(A_ij, dim=1)[0], dim=-1)
+        CX = torch.clamp(CX, min=1e-6, max=1.0)
         return -torch.log(CX)
 
 
@@ -67,6 +78,7 @@ class ContextualLoss_forward(nn.Module):
         X_features&Y_features are are feature vectors or feature 2d array
         h: bandwidth
         return the per-sample loss
+        NUMERICALLY STABLE VERSION - prevents NaN from exp overflow
         """
         batch_size = X_features.shape[0]
         feature_depth = X_features.shape[1]
@@ -90,15 +102,25 @@ class ContextualLoss_forward(nn.Module):
         X_features_permute = X_features.permute(0, 2, 1)  # batch_size * feature_size^2 * feature_depth
         d = 1 - torch.matmul(X_features_permute, Y_features)  # batch_size * feature_size^2 * feature_size^2
 
-        # normalized distance: dij_bar
-        d_norm = d / (torch.min(d, dim=-1, keepdim=True)[0] + 1e-5)  # batch_size * feature_size^2 * feature_size^2
+        # Clamp distance to prevent extreme values
+        d = torch.clamp(d, min=0.0, max=2.0)
 
-        # pairwise affinity
-        w = torch.exp((1 - d_norm) / h)
-        A_ij = w / torch.sum(w, dim=-1, keepdim=True)
+        # normalized distance: dij_bar (with larger epsilon for stability)
+        d_min = torch.min(d, dim=-1, keepdim=True)[0]
+        d_norm = d / (d_min + 1e-3)  # Increased epsilon from 1e-5 to 1e-3
+
+        # Clamp d_norm to prevent extreme exp() inputs
+        d_norm = torch.clamp(d_norm, min=0.0, max=1.0 + 50.0 * h)
+
+        # pairwise affinity (numerically stable)
+        exp_input = (1 - d_norm) / h
+        exp_input = torch.clamp(exp_input, min=-20.0, max=20.0)
+        w = torch.exp(exp_input)
+        A_ij = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-8)
 
         # contextual loss per sample
         CX = torch.mean(torch.max(A_ij, dim=-1)[0], dim=1)
+        CX = torch.clamp(CX, min=1e-6, max=1.0)
         return -torch.log(CX)
 
 
