@@ -81,6 +81,18 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
 
                     # Compute loss
                     loss, loss_dict = criterion(output_ab, gt_ab)
+
+                    # 🔥 NaN Detection: Check if loss is valid
+                    if not torch.isfinite(loss):
+                        print(f"\n⚠️  NaN/Inf detected in frame {i}!")
+                        print(f"  Loss value: {loss.item()}")
+                        print(f"  Loss dict: {loss_dict}")
+                        print(f"  Output AB range: [{output_ab.min().item():.3f}, {output_ab.max().item():.3f}]")
+                        print(f"  GT AB range: [{gt_ab.min().item():.3f}, {gt_ab.max().item():.3f}]")
+                        # Skip this batch to prevent crash
+                        print(f"  Skipping this batch to prevent crash...")
+                        continue
+
                     frame_losses.append(loss)
 
                 # Average loss over 4 frames
@@ -209,7 +221,7 @@ def main():
     criterion = FusionLoss(
         lambda_l1=1.0,
         lambda_perceptual=0.05,
-        lambda_contextual=0.1,
+        lambda_contextual=0.015,  # 🔥 CRITICAL FIX: Reduced from 0.1 to 0.015 (SwinTExCo paper value)
         lambda_temporal=0.5,
         use_temporal=True,
         contextual_chunk_size=args.contextual_chunk_size,

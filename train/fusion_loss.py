@@ -115,57 +115,63 @@ class ContextualLoss(nn.Module):
         Returns:
             loss: scalar (averaged over batch)
         """
-        batch_size = pred.shape[0]
-        feature_depth = pred.shape[1]
+        # 🔥 CRITICAL: Disable autocast to prevent FP16 overflow in contextual loss
+        with torch.cuda.amp.autocast(enabled=False):
+            # Ensure FP32 computation
+            pred = pred.float()
+            target = target.float()
 
-        # Convert to feature vectors
-        X_features = pred  # [B, 2, H, W]
-        Y_features = target  # [B, 2, H, W]
+            batch_size = pred.shape[0]
+            feature_depth = pred.shape[1]
 
-        # Feature centering (subtract mean from target features)
-        if feature_centering:
-            Y_mean = Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
-            X_features = X_features - Y_mean
-            Y_features = Y_features - Y_mean
+            # Convert to feature vectors
+            X_features = pred  # [B, 2, H, W]
+            Y_features = target  # [B, 2, H, W]
 
-        # Normalize features (L2 normalization)
-        X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
-        Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
+            # Feature centering (subtract mean from target features)
+            if feature_centering:
+                Y_mean = Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
+                X_features = X_features - Y_mean
+                Y_features = Y_features - Y_mean
 
-        # Cosine distance = 1 - similarity
-        X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, 2]
-        d = 1 - torch.matmul(X_features_permute, Y_features)  # [B, H*W, H*W]
+            # Normalize features (L2 normalization)
+            X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
+            Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, 2, H*W]
 
-        # Clamp distance to prevent extreme values
-        d = torch.clamp(d, min=0.0, max=2.0)  # Cosine distance is in [0, 2]
+            # Cosine distance = 1 - similarity
+            X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, 2]
+            d = 1 - torch.matmul(X_features_permute, Y_features)  # [B, H*W, H*W]
 
-        # Normalized distance (with larger epsilon for stability)
-        d_min = torch.min(d, dim=-1, keepdim=True)[0]
-        d_norm = d / (d_min + 1e-3)  # Increased epsilon from 1e-5 to 1e-3
+            # Clamp distance to prevent extreme values
+            d = torch.clamp(d, min=0.0, max=2.0)  # Cosine distance is in [0, 2]
 
-        # Clamp d_norm to prevent extreme exp() inputs
-        d_norm = torch.clamp(d_norm, min=0.0, max=1.0 + 50.0 * self.h)  # For h=0.1, max d_norm=6.0
+            # Normalized distance (with larger epsilon for stability)
+            d_min = torch.min(d, dim=-1, keepdim=True)[0]
+            d_norm = d / (d_min + 1e-3)  # Increased epsilon from 1e-5 to 1e-3
 
-        # Pairwise affinity (numerically stable)
-        exp_input = (1 - d_norm) / self.h
-        exp_input = torch.clamp(exp_input, min=-20.0, max=20.0)
-        w = torch.exp(exp_input)
+            # Clamp d_norm to prevent extreme exp() inputs
+            d_norm = torch.clamp(d_norm, min=0.0, max=1.0 + 50.0 * self.h)  # For h=0.1, max d_norm=6.0
 
-        # Normalize to get affinity matrix (add epsilon to prevent division by zero)
-        A_ij = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-8)
+            # Pairwise affinity (numerically stable)
+            exp_input = (1 - d_norm) / self.h
+            exp_input = torch.clamp(exp_input, min=-20.0, max=20.0)
+            w = torch.exp(exp_input)
 
-        # Contextual similarity per sample
-        # For each position in pred, find best match in target
-        CX = torch.mean(torch.max(A_ij, dim=1)[0], dim=-1)  # [B]
+            # Normalize to get affinity matrix (add epsilon to prevent division by zero)
+            A_ij = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-8)
 
-        # Clamp CX to prevent log(0)
-        CX = torch.clamp(CX, min=1e-6, max=1.0)
+            # Contextual similarity per sample
+            # For each position in pred, find best match in target
+            CX = torch.mean(torch.max(A_ij, dim=1)[0], dim=-1)  # [B]
 
-        # Contextual loss (negative log)
-        loss = -torch.log(CX)  # [B]
+            # Clamp CX to prevent log(0)
+            CX = torch.clamp(CX, min=1e-6, max=1.0)
 
-        # Average over batch
-        return loss.mean()
+            # Contextual loss (negative log)
+            loss = -torch.log(CX)  # [B]
+
+            # Average over batch
+            return loss.mean()
 
 
 class SwinContextualLoss(nn.Module):
@@ -204,56 +210,62 @@ class SwinContextualLoss(nn.Module):
         Returns:
             loss: scalar
         """
-        batch_size = pred_feat.shape[0]
-        feature_depth = pred_feat.shape[1]
+        # 🔥 CRITICAL: Disable autocast to prevent FP16 overflow
+        with torch.cuda.amp.autocast(enabled=False):
+            # Ensure FP32 computation
+            pred_feat = pred_feat.float()
+            target_feat = target_feat.float()
 
-        X_features = pred_feat
-        Y_features = target_feat
+            batch_size = pred_feat.shape[0]
+            feature_depth = pred_feat.shape[1]
 
-        # Feature centering
-        if feature_centering:
-            Y_mean = Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
-            X_features = X_features - Y_mean
-            Y_features = Y_features - Y_mean
+            X_features = pred_feat
+            Y_features = target_feat
 
-        # Normalize features (L2 normalization)
-        X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, C, H*W]
-        Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, C, H*W]
+            # Feature centering
+            if feature_centering:
+                Y_mean = Y_features.view(batch_size, feature_depth, -1).mean(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1)
+                X_features = X_features - Y_mean
+                Y_features = Y_features - Y_mean
 
-        # Cosine distance = 1 - similarity
-        X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, C]
-        d = 1 - torch.matmul(X_features_permute, Y_features)  # [B, H*W, H*W]
+            # Normalize features (L2 normalization)
+            X_features = self._feature_normalize(X_features).view(batch_size, feature_depth, -1)  # [B, C, H*W]
+            Y_features = self._feature_normalize(Y_features).view(batch_size, feature_depth, -1)  # [B, C, H*W]
 
-        # Clamp distance to prevent extreme values
-        d = torch.clamp(d, min=0.0, max=2.0)  # Cosine distance is in [0, 2]
+            # Cosine distance = 1 - similarity
+            X_features_permute = X_features.permute(0, 2, 1)  # [B, H*W, C]
+            d = 1 - torch.matmul(X_features_permute, Y_features)  # [B, H*W, H*W]
 
-        # Normalized distance (with larger epsilon for stability)
-        d_min = torch.min(d, dim=-1, keepdim=True)[0]
-        d_norm = d / (d_min + 1e-3)  # Increased epsilon from 1e-5 to 1e-3
+            # Clamp distance to prevent extreme values
+            d = torch.clamp(d, min=0.0, max=2.0)  # Cosine distance is in [0, 2]
 
-        # Clamp d_norm to prevent extreme exp() inputs
-        # exp(x) overflows when x > ~88, so we limit (1 - d_norm) / h
-        d_norm = torch.clamp(d_norm, min=0.0, max=1.0 + 50.0 * self.h)  # For h=0.1, max d_norm=6.0
+            # Normalized distance (with larger epsilon for stability)
+            d_min = torch.min(d, dim=-1, keepdim=True)[0]
+            d_norm = d / (d_min + 1e-3)  # Increased epsilon from 1e-5 to 1e-3
 
-        # Pairwise affinity (numerically stable)
-        # Clamp the exp input to prevent overflow (max ~20 for safety)
-        exp_input = (1 - d_norm) / self.h
-        exp_input = torch.clamp(exp_input, min=-20.0, max=20.0)
-        w = torch.exp(exp_input)
+            # Clamp d_norm to prevent extreme exp() inputs
+            # exp(x) overflows when x > ~88, so we limit (1 - d_norm) / h
+            d_norm = torch.clamp(d_norm, min=0.0, max=1.0 + 50.0 * self.h)  # For h=0.1, max d_norm=6.0
 
-        # Normalize to get affinity matrix (add epsilon to prevent division by zero)
-        A_ij = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-8)
+            # Pairwise affinity (numerically stable)
+            # Clamp the exp input to prevent overflow (max ~20 for safety)
+            exp_input = (1 - d_norm) / self.h
+            exp_input = torch.clamp(exp_input, min=-20.0, max=20.0)
+            w = torch.exp(exp_input)
 
-        # Contextual similarity
-        CX = torch.mean(torch.max(A_ij, dim=-1)[0], dim=1)  # [B] - forward matching
+            # Normalize to get affinity matrix (add epsilon to prevent division by zero)
+            A_ij = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-8)
 
-        # Clamp CX to prevent log(0)
-        CX = torch.clamp(CX, min=1e-6, max=1.0)
+            # Contextual similarity
+            CX = torch.mean(torch.max(A_ij, dim=-1)[0], dim=1)  # [B] - forward matching
 
-        # Contextual loss (negative log-likelihood)
-        loss = -torch.log(CX)  # [B]
+            # Clamp CX to prevent log(0)
+            CX = torch.clamp(CX, min=1e-6, max=1.0)
 
-        return loss.mean()
+            # Contextual loss (negative log-likelihood)
+            loss = -torch.log(CX)  # [B]
+
+            return loss.mean()
 
     def forward(self, pred_lab, reference_lab, embed_net):
         """
