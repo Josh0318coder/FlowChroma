@@ -74,13 +74,34 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
 
                 # Compute loss for each frame in the sequence
                 frame_losses = []
+                frame_0_loss_dict = None  # Save frame 0's loss_dict for contextual loss display
                 for i, (output_lab, gt_lab) in enumerate(zip(outputs, frames_lab)):
                     # Extract AB channels for loss computation
                     output_ab = output_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
                     gt_ab = gt_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
 
-                    # Compute loss
-                    loss, loss_dict = criterion(output_ab, gt_ab)
+                    # Prepare for Swin Contextual Loss (only needed for frame 0)
+                    if i == 0:
+                        output_lab_batch = output_lab.unsqueeze(0)  # [1, 3, H, W]
+                        reference_lab_batch = system.swintexco.processor(references_pil[i]).unsqueeze(0).to(args.device)
+                        embed_net = system.swintexco.embed_net
+                    else:
+                        output_lab_batch = None
+                        reference_lab_batch = None
+                        embed_net = None
+
+                    # Compute loss with frame index and Swin contextual loss support
+                    loss, loss_dict = criterion(
+                        output_ab, gt_ab,
+                        frame_idx=i,
+                        pred_lab=output_lab_batch,
+                        reference_lab=reference_lab_batch,
+                        embed_net=embed_net
+                    )
+
+                    # Save frame 0's loss_dict (contains contextual loss)
+                    if i == 0:
+                        frame_0_loss_dict = loss_dict
 
                     # 🔥 NaN Detection: Check if loss is valid
                     if not torch.isfinite(loss):
@@ -119,20 +140,25 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
             scaler.update()
             optimizer.zero_grad()
 
-        # Accumulate losses (use last frame's loss_dict for display)
+        # Accumulate losses (use frame 0's loss_dict for contextual loss)
         epoch_losses['total'] += batch_loss.item()
-        if loss_dict:
+        if frame_0_loss_dict:
             for key in ['l1', 'perceptual', 'contextual', 'temporal']:
-                if key in loss_dict:
-                    epoch_losses[key] += loss_dict[key]
+                if key in frame_0_loss_dict:
+                    epoch_losses[key] += frame_0_loss_dict[key]
 
         total_sequences += batch_size
 
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': batch_loss.item(),
+        # Update progress bar with contextual loss
+        postfix_dict = {
+            'loss': f"{batch_loss.item():.4f}",
             'seqs': total_sequences
-        })
+        }
+        # Add contextual loss to progress bar (from frame 0)
+        if frame_0_loss_dict and 'contextual' in frame_0_loss_dict:
+            postfix_dict['ctx'] = f"{frame_0_loss_dict['contextual']:.4f}"
+
+        pbar.set_postfix(postfix_dict)
 
     # Average losses
     num_batches = len(dataloader)
