@@ -286,22 +286,28 @@ class FusionSystem(nn.Module):
 
         return warpnet_ab, similarity_map
 
-    def forward_sequence(self, frames_lab, frames_pil, references_pil):
+    def forward_sequence(self, frames_lab, frames_pil, references_pil, return_memflow=False):
         """
-        Process a sequence of frames (for inference)
+        Process a sequence of frames
 
         Args:
             frames_lab: list of [3, H, W] LAB tensors (normalized to [-1, 1])
             frames_pil: list of PIL Images (RGB, target frames)
             references_pil: list of PIL Images (RGB, reference frames, typically all the same)
+            return_memflow: bool, whether to return MemFlow outputs (for temporal loss in training)
 
         Returns:
-            list of [3, H, W] LAB tensors (colorized results, CPU)
+            If return_memflow=False:
+                results: list of [3, H, W] LAB tensors (colorized results)
+            If return_memflow=True:
+                (results, memflow_outputs, memflow_confs): tuple of lists
         """
         # Reset memory at the start of sequence
         self.reset_memory()
 
         results = []
+        memflow_outputs = [] if return_memflow else None
+        memflow_confs = [] if return_memflow else None
 
         for i in range(len(frames_lab)):
             # Convert to batch [1, 3, H, W]
@@ -353,12 +359,30 @@ class FusionSystem(nn.Module):
                 # frame_t_batch = prev_output.unsqueeze(0)  # No detach - gradients flow through
 
                 # Forward pass (curr_ti will be managed automatically)
-                output_lab = self.forward(
-                    frame_t_batch,
-                    frame_t1_batch,
-                    references_pil[i],
-                    frames_pil[i]
-                )
+                # If return_memflow is True, we need to capture MemFlow outputs
+                if return_memflow:
+                    output_lab, memflow_lab, memflow_conf = self.forward_with_memflow(
+                        frame_t_batch,
+                        frame_t1_batch,
+                        references_pil[i],
+                        frames_pil[i]
+                    )
+                else:
+                    output_lab = self.forward(
+                        frame_t_batch,
+                        frame_t1_batch,
+                        references_pil[i],
+                        frames_pil[i]
+                    )
+                    # Set dummy values (won't be used)
+                    memflow_lab = None
+                    memflow_conf = None
+
+            # Store MemFlow outputs if requested
+            if return_memflow:
+                # Remove batch dimension and store
+                memflow_outputs.append(memflow_lab.squeeze(0))
+                memflow_confs.append(memflow_conf.squeeze(0))
 
             # Remove batch dimension
             # Keep on device for training (gradient computation)
@@ -368,7 +392,10 @@ class FusionSystem(nn.Module):
             else:
                 results.append(output_lab.squeeze(0).cpu())
 
-        return results
+        if return_memflow:
+            return results, memflow_outputs, memflow_confs
+        else:
+            return results
 
     def forward_single_frame(self, frame_t, frame_t1, reference_pil, target_pil, is_first=False):
         """
@@ -415,6 +442,54 @@ class FusionSystem(nn.Module):
         fused_lab = torch.cat([L_channel, fused_ab], dim=1)
 
         return fused_lab
+
+    def forward_with_memflow(self, frame_t, frame_t1, reference_pil, target_pil):
+        """
+        Complete forward pass that also returns MemFlow outputs (for temporal loss)
+
+        Args:
+            frame_t: [B, 3, H, W] LAB tensor (normalized)
+            frame_t1: [B, 3, H, W] LAB tensor (normalized)
+            reference_pil: PIL Image (RGB)
+            target_pil: PIL Image (RGB)
+
+        Returns:
+            fused_lab: [B, 3, H, W] - Complete LAB prediction
+            memflow_lab: [B, 3, H, W] - MemFlow LAB output
+            memflow_conf: [B, 1, H, W] - MemFlow confidence
+        """
+        B, _, H, W = frame_t1.shape
+        L_channel = frame_t1[:, 0:1, :, :]
+
+        # 1. MemFlow inference (frozen)
+        is_first = (self.curr_ti == -1)
+        if is_first:
+            # First frame: use zero placeholder
+            memflow_lab = torch.zeros(B, 3, H, W, device=self.device)
+            memflow_conf = torch.zeros(B, 1, H, W, device=self.device)
+        else:
+            # Subsequent frames: normal inference
+            memflow_lab, memflow_conf = self.memflow_inference(frame_t, frame_t1)
+
+        # 2. SwinTExCo inference (always valid)
+        swintexco_ab, swintexco_sim = self.swintexco_inference(reference_pil, target_pil)
+
+        # Construct complete SwinTExCo LAB prediction (for symmetry with MemFlow)
+        swintexco_lab = torch.cat([L_channel, swintexco_ab], dim=1)
+
+        # 3. Fusion UNet inference (trainable)
+        # Note: fusion_unet returns AB channels only (2 channels)
+        fused_ab = self.fusion_unet(
+            memflow_lab,
+            memflow_conf,
+            swintexco_lab,
+            swintexco_sim
+        )
+
+        # Construct complete LAB output by concatenating L channel
+        fused_lab = torch.cat([L_channel, fused_ab], dim=1)
+
+        return fused_lab, memflow_lab, memflow_conf
 
     def forward(self, frame_t, frame_t1, reference_pil, target_pil):
         """

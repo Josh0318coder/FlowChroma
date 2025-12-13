@@ -357,6 +357,60 @@ class TemporalLoss(nn.Module):
         return loss
 
 
+class AdaptiveTemporalLoss(nn.Module):
+    """
+    Adaptive Temporal Consistency Loss (New version - no optical flow required)
+
+    Combines two strategies:
+    1. Align Loss: High-confidence regions should follow MemFlow (confidence-weighted)
+    2. Smooth Loss: All regions should maintain temporal smoothness (global constraint)
+
+    This design addresses the limitation that video colorization lacks pre-computed optical flow,
+    while ensuring both spatial alignment with MemFlow and temporal coherence across frames.
+    """
+    def __init__(self, lambda_smooth=0.3):
+        """
+        Args:
+            lambda_smooth: Weight for the global smoothness loss (default: 0.3)
+        """
+        super().__init__()
+        self.lambda_smooth = lambda_smooth
+
+    def forward(self, fusion_t, fusion_t1, memflow_t, memflow_t1,
+                memflow_conf_t, memflow_conf_t1):
+        """
+        Compute adaptive temporal loss
+
+        Args:
+            fusion_t: [B, 2, H, W] Fusion output AB channels at frame t
+            fusion_t1: [B, 2, H, W] Fusion output AB channels at frame t+1
+            memflow_t: [B, 2, H, W] MemFlow output AB channels at frame t
+            memflow_t1: [B, 2, H, W] MemFlow output AB channels at frame t+1
+            memflow_conf_t: [B, 1, H, W] MemFlow confidence at frame t
+            memflow_conf_t1: [B, 1, H, W] MemFlow confidence at frame t+1
+
+        Returns:
+            loss: scalar
+        """
+        # 1. Align Loss: Force high-confidence regions to follow MemFlow
+        # This ensures temporal coherence by leveraging MemFlow's temporal consistency
+        diff_t = torch.abs(fusion_t - memflow_t)
+        diff_t1 = torch.abs(fusion_t1 - memflow_t1)
+
+        align_loss_t = (diff_t * memflow_conf_t).mean()
+        align_loss_t1 = (diff_t1 * memflow_conf_t1).mean()
+        align_loss = (align_loss_t + align_loss_t1) / 2
+
+        # 2. Smooth Loss: Encourage smooth transitions across all regions
+        # This prevents flickering even in low-confidence areas where SwinTExCo dominates
+        smooth_loss = torch.abs(fusion_t1 - fusion_t).mean()
+
+        # Combine both losses
+        total_loss = align_loss + self.lambda_smooth * smooth_loss
+
+        return total_loss
+
+
 class FusionLoss(nn.Module):
     """
     Complete Fusion Loss
@@ -379,8 +433,10 @@ class FusionLoss(nn.Module):
                  lambda_perceptual=0.05,
                  lambda_contextual=0.015,  # SwinTExCo paper uses 0.015, not 0.5!
                  lambda_temporal=0.5,
+                 lambda_smooth=0.3,  # Weight for smooth component in adaptive temporal loss
                  use_temporal=True,
                  use_swin_contextual=True,  # Use Swin-based contextual loss
+                 use_adaptive_temporal=True,  # Use adaptive temporal loss (no optical flow)
                  contextual_chunk_size=256,
                  device='cuda'):
         super().__init__()
@@ -392,6 +448,7 @@ class FusionLoss(nn.Module):
         self.contextual_chunk_size = contextual_chunk_size
         self.use_temporal = use_temporal
         self.use_swin_contextual = use_swin_contextual
+        self.use_adaptive_temporal = use_adaptive_temporal
 
         # Loss components
         self.l1_loss = nn.L1Loss()
@@ -402,23 +459,33 @@ class FusionLoss(nn.Module):
         self.contextual_loss = ContextualLoss(device=device)  # Fallback for AB-based
 
         if use_temporal:
-            self.temporal_loss = TemporalLoss()
+            if use_adaptive_temporal:
+                # Use new adaptive temporal loss (no optical flow required)
+                self.temporal_loss = AdaptiveTemporalLoss(lambda_smooth=lambda_smooth)
+            else:
+                # Use old optical flow-based temporal loss
+                self.temporal_loss = TemporalLoss()
 
     def forward(self, pred_ab, gt_ab, flow=None, mask=None, prev_pred_ab=None,
-                frame_idx=None, pred_lab=None, reference_lab=None, embed_net=None):
+                frame_idx=None, pred_lab=None, reference_lab=None, embed_net=None,
+                memflow_ab=None, memflow_conf=None, prev_memflow_ab=None, prev_memflow_conf=None):
         """
         Compute total loss
 
         Args:
             pred_ab: [B, 2, H, W] predicted AB channels
             gt_ab: [B, 2, H, W] ground truth AB channels
-            flow: [B, 2, H, W] optical flow (for temporal loss)
-            mask: [B, 1, H, W] valid mask (for temporal loss)
-            prev_pred_ab: [B, 2, H, W] previous frame prediction (for temporal loss)
+            flow: [B, 2, H, W] optical flow (for old temporal loss)
+            mask: [B, 1, H, W] valid mask (for old temporal loss)
+            prev_pred_ab: [B, 2, H, W] previous frame prediction (for old temporal loss)
             frame_idx: int, frame index in sequence (for Swin contextual loss)
             pred_lab: [B, 3, H, W] predicted LAB (for Swin contextual loss)
             reference_lab: [B, 3, H, W] reference image LAB (for Swin contextual loss)
             embed_net: Swin model for feature extraction (for Swin contextual loss)
+            memflow_ab: [B, 2, H, W] MemFlow AB output (for adaptive temporal loss)
+            memflow_conf: [B, 1, H, W] MemFlow confidence (for adaptive temporal loss)
+            prev_memflow_ab: [B, 2, H, W] previous MemFlow AB (for adaptive temporal loss)
+            prev_memflow_conf: [B, 1, H, W] previous MemFlow confidence (for adaptive temporal loss)
 
         Returns:
             total_loss: scalar
@@ -463,10 +530,31 @@ class FusionLoss(nn.Module):
             loss_dict['contextual'] = 0.0
 
         # Temporal Loss (optional)
-        if self.use_temporal and flow is not None and prev_pred_ab is not None:
-            loss_temporal = self.temporal_loss(prev_pred_ab, pred_ab, flow, mask)
-            total_loss += self.lambda_temporal * loss_temporal
-            loss_dict['temporal'] = (self.lambda_temporal * loss_temporal).item()
+        if self.use_temporal:
+            if self.use_adaptive_temporal:
+                # Adaptive temporal loss (requires MemFlow outputs)
+                if (memflow_ab is not None and memflow_conf is not None and
+                    prev_memflow_ab is not None and prev_memflow_conf is not None and
+                    prev_pred_ab is not None):
+                    loss_temporal = self.temporal_loss(
+                        prev_pred_ab, pred_ab,  # fusion outputs
+                        prev_memflow_ab, memflow_ab,  # memflow outputs
+                        prev_memflow_conf, memflow_conf  # confidences
+                    )
+                    total_loss += self.lambda_temporal * loss_temporal
+                    loss_dict['temporal'] = (self.lambda_temporal * loss_temporal).item()
+                else:
+                    loss_dict['temporal'] = 0.0
+            else:
+                # Old optical flow-based temporal loss
+                if flow is not None and prev_pred_ab is not None:
+                    loss_temporal = self.temporal_loss(prev_pred_ab, pred_ab, flow, mask)
+                    total_loss += self.lambda_temporal * loss_temporal
+                    loss_dict['temporal'] = (self.lambda_temporal * loss_temporal).item()
+                else:
+                    loss_dict['temporal'] = 0.0
+        else:
+            loss_dict['temporal'] = 0.0
 
         loss_dict['total'] = total_loss.item()
 

@@ -82,8 +82,15 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
 
             # Process sequence (4 frames) with forward_sequence
             with autocast(enabled=args.use_amp):
-                # Forward sequence: returns List of 4 LAB outputs
-                outputs = system.forward_sequence(frames_lab, frames_pil, references_pil)
+                # Forward sequence: returns (outputs, memflow_outputs, memflow_confs) if return_memflow=True
+                if criterion.use_temporal and criterion.use_adaptive_temporal:
+                    outputs, memflow_outputs, memflow_confs = system.forward_sequence(
+                        frames_lab, frames_pil, references_pil, return_memflow=True
+                    )
+                else:
+                    outputs = system.forward_sequence(frames_lab, frames_pil, references_pil)
+                    memflow_outputs = None
+                    memflow_confs = None
 
                 # Compute loss for each frame in the sequence
                 frame_losses = []
@@ -103,13 +110,36 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                         reference_lab_batch = None
                         embed_net = None
 
-                    # Compute loss with frame index and Swin contextual loss support
+                    # Prepare for Adaptive Temporal Loss (from frame 1 onwards)
+                    if i >= 1 and memflow_outputs is not None:
+                        # Previous frame outputs
+                        prev_pred_ab = outputs[i-1][1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
+                        prev_memflow_ab = memflow_outputs[i-1][1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
+                        prev_memflow_conf = memflow_confs[i-1].unsqueeze(0)  # [1, 1, H, W]
+
+                        # Current frame MemFlow outputs
+                        memflow_ab = memflow_outputs[i][1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
+                        memflow_conf = memflow_confs[i].unsqueeze(0)  # [1, 1, H, W]
+                    else:
+                        prev_pred_ab = None
+                        prev_memflow_ab = None
+                        prev_memflow_conf = None
+                        memflow_ab = None
+                        memflow_conf = None
+
+                    # Compute loss with all components
                     loss, loss_dict = criterion(
                         output_ab, gt_ab,
                         frame_idx=i,
                         pred_lab=output_lab_batch,
                         reference_lab=reference_lab_batch,
-                        embed_net=embed_net
+                        embed_net=embed_net,
+                        # Adaptive temporal loss parameters
+                        prev_pred_ab=prev_pred_ab,
+                        memflow_ab=memflow_ab,
+                        memflow_conf=memflow_conf,
+                        prev_memflow_ab=prev_memflow_ab,
+                        prev_memflow_conf=prev_memflow_conf
                     )
 
                     # Save frame 0's loss_dict (contains contextual loss)
@@ -231,6 +261,14 @@ def main():
     parser.add_argument('--contextual_chunk_size', type=int, default=256,
                         help='Chunk size for Contextual Loss (default: 256). Use 64 or 128 for less memory')
 
+    # Loss Weights
+    parser.add_argument('--lambda_temporal', type=float, default=0.5,
+                        help='Weight for temporal loss (default: 0.5)')
+    parser.add_argument('--lambda_smooth', type=float, default=0.3,
+                        help='Weight for smooth component in adaptive temporal loss (default: 0.3)')
+    parser.add_argument('--use_adaptive_temporal', action='store_true', default=True,
+                        help='Use adaptive temporal loss (no optical flow required)')
+
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='fusion/checkpoints',
                         help='Directory to save checkpoints')
@@ -268,8 +306,10 @@ def main():
         lambda_l1=1.0,
         lambda_perceptual=0.05,
         lambda_contextual=0.015,  # 🔥 CRITICAL FIX: Reduced from 0.1 to 0.015 (SwinTExCo paper value)
-        lambda_temporal=0.5,
+        lambda_temporal=args.lambda_temporal,
+        lambda_smooth=args.lambda_smooth,
         use_temporal=True,
+        use_adaptive_temporal=args.use_adaptive_temporal,
         contextual_chunk_size=args.contextual_chunk_size,
         device=args.device
     )
