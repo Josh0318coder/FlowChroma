@@ -95,6 +95,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                 # Compute loss for each frame in the sequence
                 frame_losses = []
                 frame_0_loss_dict = None  # Save frame 0's loss_dict for contextual loss display
+                latest_loss_dict = None  # Save latest frame's loss_dict for temporal loss display
                 for i, (output_lab, gt_lab) in enumerate(zip(outputs, frames_lab)):
                     # Extract AB channels for loss computation
                     output_ab = output_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
@@ -146,6 +147,9 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                     if i == 0:
                         frame_0_loss_dict = loss_dict
 
+                    # Save latest frame's loss_dict for temporal loss display
+                    latest_loss_dict = loss_dict
+
                     # 🔥 NaN Detection: Check if loss is valid
                     if not torch.isfinite(loss):
                         print(f"\n⚠️  NaN/Inf detected in frame {i}!")
@@ -194,10 +198,14 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
 
         # Update progress bar with detailed losses
         postfix_dict = {
-            'loss': f"{batch_loss.item():.4f}",
             'seqs': total_sequences
         }
-        # Add individual losses to progress bar (from frame 0)
+
+        # Add temporal loss first (from latest frame that has temporal loss)
+        if latest_loss_dict and 'temporal' in latest_loss_dict and latest_loss_dict['temporal'] > 0:
+            postfix_dict['temp'] = f"{latest_loss_dict['temporal']:.4f}"
+
+        # Add other losses (from frame 0)
         if frame_0_loss_dict:
             if 'l1' in frame_0_loss_dict:
                 postfix_dict['l1'] = f"{frame_0_loss_dict['l1']:.4f}"
