@@ -343,7 +343,8 @@ class FusionSystem(nn.Module):
                 # Construct complete LAB output
                 output_lab = torch.cat([L_channel, fused_ab], dim=1)
 
-                # After first frame, curr_ti remains -1 (will increment to 0 on next call)
+                # After first frame, increment curr_ti to 0 (so next frame is not treated as first)
+                self.curr_ti += 1
             else:
                 # Subsequent frames: use PREVIOUS PREDICTION (not GT)
                 # This enables error accumulation training (like real inference)
