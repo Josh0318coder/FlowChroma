@@ -408,7 +408,7 @@ class AdaptiveTemporalLoss(nn.Module):
         # Combine both losses
         total_loss = align_loss + self.lambda_smooth * smooth_loss
 
-        return total_loss
+        return total_loss, align_loss, smooth_loss
 
 
 class FusionLoss(nn.Module):
@@ -536,25 +536,35 @@ class FusionLoss(nn.Module):
                 if (memflow_ab is not None and memflow_conf is not None and
                     prev_memflow_ab is not None and prev_memflow_conf is not None and
                     prev_pred_ab is not None):
-                    loss_temporal = self.temporal_loss(
+                    loss_temporal, align_loss, smooth_loss = self.temporal_loss(
                         prev_pred_ab, pred_ab,  # fusion outputs
                         prev_memflow_ab, memflow_ab,  # memflow outputs
                         prev_memflow_conf, memflow_conf  # confidences
                     )
                     total_loss += self.lambda_temporal * loss_temporal
                     loss_dict['temporal'] = (self.lambda_temporal * loss_temporal).item()
+                    loss_dict['align'] = align_loss.item()
+                    loss_dict['smooth'] = smooth_loss.item()
                 else:
                     loss_dict['temporal'] = 0.0
+                    loss_dict['align'] = 0.0
+                    loss_dict['smooth'] = 0.0
             else:
                 # Old optical flow-based temporal loss
                 if flow is not None and prev_pred_ab is not None:
                     loss_temporal = self.temporal_loss(prev_pred_ab, pred_ab, flow, mask)
                     total_loss += self.lambda_temporal * loss_temporal
                     loss_dict['temporal'] = (self.lambda_temporal * loss_temporal).item()
+                    loss_dict['align'] = 0.0
+                    loss_dict['smooth'] = 0.0
                 else:
                     loss_dict['temporal'] = 0.0
+                    loss_dict['align'] = 0.0
+                    loss_dict['smooth'] = 0.0
         else:
             loss_dict['temporal'] = 0.0
+            loss_dict['align'] = 0.0
+            loss_dict['smooth'] = 0.0
 
         loss_dict['total'] = total_loss.item()
 

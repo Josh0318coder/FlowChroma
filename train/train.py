@@ -197,13 +197,14 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
         total_sequences += batch_size
 
         # Update progress bar with detailed losses
-        postfix_dict = {
-            'seqs': total_sequences
-        }
+        postfix_dict = {}
 
-        # Add temporal loss first (from latest frame that has temporal loss)
-        if latest_loss_dict and 'temporal' in latest_loss_dict and latest_loss_dict['temporal'] > 0:
-            postfix_dict['temp'] = f"{latest_loss_dict['temporal']:.4f}"
+        # Add temporal loss components (align and smooth) from latest frame
+        if latest_loss_dict:
+            if 'align' in latest_loss_dict and latest_loss_dict['align'] > 0:
+                postfix_dict['alg'] = f"{latest_loss_dict['align']:.4f}"
+            if 'smooth' in latest_loss_dict and latest_loss_dict['smooth'] > 0:
+                postfix_dict['smo'] = f"{latest_loss_dict['smooth']:.4f}"
 
         # Add other losses (from frame 0)
         if frame_0_loss_dict:
