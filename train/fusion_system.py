@@ -192,7 +192,7 @@ class FusionSystem(nn.Module):
             coords0, coords1, fmaps = self.memflow.encode_features(images_norm)
 
             # Memory management
-            if self.curr_ti == 0:
+            if self.memflow_memory is None:
                 ref_values = None
                 ref_keys = key.unsqueeze(2)
             else:
