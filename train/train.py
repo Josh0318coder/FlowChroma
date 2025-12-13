@@ -201,9 +201,9 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
 
         # Add temporal loss components (align and smooth) from latest frame
         if latest_loss_dict:
-            if 'align' in latest_loss_dict and latest_loss_dict['align'] > 0:
+            if 'align' in latest_loss_dict:
                 postfix_dict['alg'] = f"{latest_loss_dict['align']:.4f}"
-            if 'smooth' in latest_loss_dict and latest_loss_dict['smooth'] > 0:
+            if 'smooth' in latest_loss_dict:
                 postfix_dict['smo'] = f"{latest_loss_dict['smooth']:.4f}"
 
         # Add other losses (from frame 0)
