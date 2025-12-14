@@ -111,16 +111,16 @@ class Discriminator(nn.Module):
     """
     Discriminator Network for 224x224 images
 
-    Based on SwinTExCo's Discriminator_x64_224.
+    Based on SwinSingle's Discriminator_x64_224.
     Uses Spectral Normalization and Self-Attention.
 
-    Input: [B, 6, 224, 224] - concatenated predicted LAB and ground truth LAB
+    Input: [B, 3, 224, 224] - LAB image (3 channels)
     Output:
         - discriminator score: [B, 1]
         - feature map: [B, 256, 14, 14]
     """
 
-    def __init__(self, in_channels=6, ndf=64):
+    def __init__(self, in_channels=3, ndf=64):
         super(Discriminator, self).__init__()
         self.in_channels = in_channels
         self.ndf = ndf
@@ -167,7 +167,7 @@ class Discriminator(nn.Module):
     def forward(self, input):
         """
         Args:
-            input: [B, 6, H, W] - concatenated LAB images
+            input: [B, 3, H, W] - LAB image
 
         Returns:
             output: [B, 1] - discriminator score

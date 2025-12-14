@@ -42,20 +42,26 @@ sys.path.insert(0, '.')
 
 from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import FusionNetV1
-from train.fusion_loss import FusionLoss
+from train.fusion_loss import FusionLoss, discriminator_loss_fn, generator_loss_fn
 from train.fusion_dataset import FusionSequenceDataset, fusion_sequence_collate_fn
+from train.discriminator import Discriminator
 
 
-def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
+def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, discriminator=None, optimizer_d=None):
     """Train for one epoch with 4-frame sequences"""
 
     system.train()
+    if discriminator is not None:
+        discriminator.train()
+
     epoch_losses = {
         'total': 0.0,
         'l1': 0.0,
         'perceptual': 0.0,
         'contextual': 0.0,
-        'temporal': 0.0
+        'temporal': 0.0,
+        'discriminator': 0.0,
+        'generator': 0.0
     }
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
@@ -143,6 +149,52 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                         prev_memflow_conf=prev_memflow_conf
                     )
 
+                    # GAN Loss (only compute on frame 0, following SwinSingle and contextual loss strategy)
+                    discriminator_loss = torch.tensor(0.0, device=args.device)
+                    generator_loss = torch.tensor(0.0, device=args.device)
+
+                    if i == 0 and discriminator is not None and args.weight_gan > 0:
+                        # Prepare LAB images for discriminator (need to uncenter L channel)
+                        from src.utils import uncenter_l
+                        fake_data_lab = torch.cat((
+                            uncenter_l(output_lab[0:1, :, :].unsqueeze(0)),  # Uncenter L: [-1,1] -> [0,1]
+                            output_ab  # AB is already [-1,1]
+                        ), dim=1)  # [1, 3, H, W]
+
+                        real_data_lab = torch.cat((
+                            uncenter_l(gt_lab[0:1, :, :].unsqueeze(0)),  # Uncenter L
+                            gt_ab  # AB from ground truth
+                        ), dim=1)  # [1, 3, H, W]
+
+                        # Train Discriminator (outside autocast to prevent AMP issues)
+                        with autocast(enabled=False):
+                            # Convert to FP32 for discriminator
+                            fake_data_lab_fp32 = fake_data_lab.float()
+                            real_data_lab_fp32 = real_data_lab.float()
+
+                            discriminator_loss = discriminator_loss_fn(
+                                real_data_lab_fp32, fake_data_lab_fp32, discriminator
+                            )
+                            discriminator_loss.backward()
+                            optimizer_d.step()
+                            optimizer_d.zero_grad()
+
+                        # Train Generator (add GAN loss to fusion network)
+                        # Only add after epoch_train_discriminator (following SwinSingle strategy)
+                        if epoch > args.epoch_train_discriminator:
+                            with autocast(enabled=False):
+                                fake_data_lab_fp32 = fake_data_lab.float()
+                                real_data_lab_fp32 = real_data_lab.float()
+
+                                generator_loss = generator_loss_fn(
+                                    real_data_lab_fp32, fake_data_lab_fp32,
+                                    discriminator, args.weight_gan, args.device
+                                )
+                                loss = loss + generator_loss  # Add to total generator loss
+
+                        loss_dict['discriminator'] = discriminator_loss.item()
+                        loss_dict['generator'] = generator_loss.item()
+
                     # Save frame 0's loss_dict (contains contextual loss)
                     if i == 0:
                         frame_0_loss_dict = loss_dict
@@ -187,10 +239,10 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
             scaler.update()
             optimizer.zero_grad()
 
-        # Accumulate losses (use frame 0's loss_dict for contextual loss)
+        # Accumulate losses (use frame 0's loss_dict for contextual loss and GAN losses)
         epoch_losses['total'] += batch_loss.item()
         if frame_0_loss_dict:
-            for key in ['l1', 'perceptual', 'contextual', 'temporal']:
+            for key in ['l1', 'perceptual', 'contextual', 'temporal', 'discriminator', 'generator']:
                 if key in frame_0_loss_dict:
                     epoch_losses[key] += frame_0_loss_dict[key]
 
@@ -214,6 +266,11 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args):
                 postfix_dict['per'] = f"{frame_0_loss_dict['perceptual']:.4f}"
             if 'contextual' in frame_0_loss_dict:
                 postfix_dict['ctx'] = f"{frame_0_loss_dict['contextual']:.4f}"
+            # GAN losses (only on frame 0)
+            if 'discriminator' in frame_0_loss_dict and frame_0_loss_dict['discriminator'] > 0:
+                postfix_dict['dis'] = f"{frame_0_loss_dict['discriminator']:.4f}"
+            if 'generator' in frame_0_loss_dict and frame_0_loss_dict['generator'] > 0:
+                postfix_dict['gan'] = f"{frame_0_loss_dict['generator']:.4f}"
 
         pbar.set_postfix(postfix_dict)
 
@@ -278,6 +335,14 @@ def main():
     parser.add_argument('--use_adaptive_temporal', action='store_true', default=True,
                         help='Use adaptive temporal loss (no optical flow required)')
 
+    # GAN Loss (from SwinSingle)
+    parser.add_argument('--weight_gan', type=float, default=0.0,
+                        help='Weight for GAN loss (default: 0.0, set >0 to enable)')
+    parser.add_argument('--epoch_train_discriminator', type=int, default=3,
+                        help='Start generator GAN loss after N epochs (default: 3)')
+    parser.add_argument('--lr_discriminator', type=float, default=1e-4,
+                        help='Learning rate for discriminator (default: 1e-4)')
+
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='fusion/checkpoints',
                         help='Directory to save checkpoints')
@@ -339,6 +404,21 @@ def main():
         eta_min=1e-6
     )
 
+    # Discriminator (optional, only if weight_gan > 0)
+    discriminator = None
+    optimizer_d = None
+    if args.weight_gan > 0:
+        print("\nInitializing Discriminator (GAN training enabled)...")
+        discriminator = Discriminator(in_channels=3, ndf=64).to(args.device)
+        optimizer_d = torch.optim.Adam(
+            discriminator.parameters(),
+            lr=args.lr_discriminator,
+            betas=(0.5, 0.999)  # Following SwinSingle's discriminator optimizer settings
+        )
+        print(f"  Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+        print(f"  GAN weight: {args.weight_gan}")
+        print(f"  Will start generator GAN loss after epoch {args.epoch_train_discriminator}")
+
     # Dataset
     print("\nLoading dataset...")
     train_dataset = FusionSequenceDataset(
@@ -379,6 +459,13 @@ def main():
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
 
+            # Restore discriminator if using GAN
+            if discriminator is not None and 'discriminator' in checkpoint:
+                discriminator.load_state_dict(checkpoint['discriminator'])
+                if optimizer_d is not None and 'optimizer_d' in checkpoint:
+                    optimizer_d.load_state_dict(checkpoint['optimizer_d'])
+                print(f"   ✅ Discriminator state loaded")
+
             # Restore training state
             start_epoch = checkpoint['epoch'] + 1
             best_loss = checkpoint.get('best_loss', float('inf'))
@@ -407,7 +494,8 @@ def main():
     for epoch in range(start_epoch, args.epochs + 1):
         # Train
         train_losses = train_epoch(
-            system, train_loader, criterion, optimizer, scaler, epoch, args
+            system, train_loader, criterion, optimizer, scaler, epoch, args,
+            discriminator=discriminator, optimizer_d=optimizer_d
         )
 
         # Print
@@ -418,6 +506,10 @@ def main():
         print(f"    - Contextual: {train_losses['contextual']:.4f}")
         if train_losses['temporal'] > 0:
             print(f"    - Temporal: {train_losses['temporal']:.4f}")
+        if train_losses['discriminator'] > 0:
+            print(f"    - Discriminator: {train_losses['discriminator']:.4f}")
+        if train_losses['generator'] > 0:
+            print(f"    - Generator: {train_losses['generator']:.4f}")
 
         # Learning rate
         scheduler.step()
@@ -439,6 +531,12 @@ def main():
                 'best_loss': best_loss,
                 'train_losses': train_losses
             }
+
+            # Save discriminator if using GAN
+            if discriminator is not None:
+                checkpoint['discriminator'] = discriminator.state_dict()
+                if optimizer_d is not None:
+                    checkpoint['optimizer_d'] = optimizer_d.state_dict()
 
             save_path = os.path.join(args.save_dir, f'fusion_epoch_{epoch}.pth')
             torch.save(checkpoint, save_path)
