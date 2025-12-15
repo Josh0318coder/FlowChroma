@@ -192,6 +192,8 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                                 )
                                 loss = loss + generator_loss  # Add to total generator loss
 
+                    # Always add GAN losses to frame 0's loss_dict (even if 0)
+                    if i == 0:
                         loss_dict['discriminator'] = discriminator_loss.item()
                         loss_dict['generator'] = generator_loss.item()
 
