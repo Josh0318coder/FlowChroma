@@ -267,9 +267,9 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
             if 'contextual' in frame_0_loss_dict:
                 postfix_dict['ctx'] = f"{frame_0_loss_dict['contextual']:.4f}"
             # GAN losses (only on frame 0)
-            if 'discriminator' in frame_0_loss_dict and frame_0_loss_dict['discriminator'] > 0:
+            if 'discriminator' in frame_0_loss_dict:
                 postfix_dict['dis'] = f"{frame_0_loss_dict['discriminator']:.4f}"
-            if 'generator' in frame_0_loss_dict and frame_0_loss_dict['generator'] > 0:
+            if 'generator' in frame_0_loss_dict:
                 postfix_dict['gan'] = f"{frame_0_loss_dict['generator']:.4f}"
 
         pbar.set_postfix(postfix_dict)
