@@ -569,3 +569,62 @@ class FusionLoss(nn.Module):
         loss_dict['total'] = total_loss.item()
 
         return total_loss, loss_dict
+
+
+# ===========================
+# GAN Loss Functions (from SwinSingle)
+# ===========================
+
+def generator_loss_fn(real_data_lab, fake_data_lab, discriminator, weight_gan, device):
+    """
+    Relativistic GAN Generator Loss (from SwinSingle)
+
+    Args:
+        real_data_lab: [B, 3, H, W] Ground truth LAB image
+        fake_data_lab: [B, 3, H, W] Generated LAB image
+        discriminator: Discriminator network
+        weight_gan: Weight for GAN loss
+        device: torch device
+
+    Returns:
+        generator_loss: scalar
+    """
+    if weight_gan > 0:
+        y_pred_fake, _ = discriminator(fake_data_lab)
+        y_pred_real, _ = discriminator(real_data_lab)
+
+        y = torch.ones_like(y_pred_real)
+        generator_loss = (
+            (
+                torch.mean((y_pred_real - torch.mean(y_pred_fake) + y) ** 2)
+                + torch.mean((y_pred_fake - torch.mean(y_pred_real) - y) ** 2)
+            )
+            / 2
+            * weight_gan
+        )
+        return generator_loss
+
+    return torch.tensor([0.0], device=device)
+
+
+def discriminator_loss_fn(real_data_lab, fake_data_lab, discriminator):
+    """
+    Relativistic GAN Discriminator Loss (from SwinSingle)
+
+    Args:
+        real_data_lab: [B, 3, H, W] Ground truth LAB image
+        fake_data_lab: [B, 3, H, W] Generated LAB image (detached)
+        discriminator: Discriminator network
+
+    Returns:
+        discriminator_loss: scalar
+    """
+    y_pred_fake, _ = discriminator(fake_data_lab.detach())
+    y_pred_real, _ = discriminator(real_data_lab.detach())
+
+    y = torch.ones_like(y_pred_real)
+    discriminator_loss = (
+        torch.mean((y_pred_real - torch.mean(y_pred_fake) - y) ** 2)
+        + torch.mean((y_pred_fake - torch.mean(y_pred_real) + y) ** 2)
+    ) / 2
+    return discriminator_loss
