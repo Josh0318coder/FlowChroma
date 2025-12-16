@@ -42,7 +42,7 @@ class FusionSystem(nn.Module):
                  memflow_path,
                  swintexco_path,
                  memflow_ckpt,
-                 swintexco_ckpt,
+                 swintexco_ckpt=None,
                  fusion_net=None,
                  device='cuda'):
         """
@@ -50,7 +50,7 @@ class FusionSystem(nn.Module):
             memflow_path: Path to MemFlow repository
             swintexco_path: Path to SwinSingle repository
             memflow_ckpt: Path to MemFlow checkpoint
-            swintexco_ckpt: Path to SwinTExCo checkpoint directory
+            swintexco_ckpt: Path to SwinTExCo checkpoint directory (None for random init)
             fusion_net: Fusion network instance (default: PlaceholderFusion)
             device: cuda or cpu
         """
@@ -80,7 +80,10 @@ class FusionSystem(nn.Module):
         print("Loading SwinTExCo...")
         print("="*60)
         self.swintexco = self._load_swintexco(swintexco_ckpt)
-        print(f"✅ SwinTExCo loaded from {swintexco_ckpt}\n")
+        if swintexco_ckpt is not None:
+            print(f"✅ SwinTExCo loaded from {swintexco_ckpt}\n")
+        else:
+            print(f"✅ SwinTExCo created with random NonLocalNet initialization\n")
 
         # ============ Create Fusion UNet ============
         print("="*60)
@@ -132,17 +135,70 @@ class FusionSystem(nn.Module):
             raise RuntimeError(f"Failed to load MemFlow: {e}\n"
                              f"Make sure memflow_path points to MemFlow repository")
 
-    def _load_swintexco(self, checkpoint_path):
-        """Load SwinTExCo model (trainable for joint training)"""
+    def _load_swintexco(self, checkpoint_path=None):
+        """
+        Load SwinTExCo model (trainable for joint training)
+
+        Args:
+            checkpoint_path: Path to pretrained weights (None for random initialization)
+
+        Strategy:
+            - If checkpoint_path is provided: Load fully pretrained model
+            - If checkpoint_path is None: Use pretrained Swin backbone + random NonLocalNet
+        """
         try:
-            from inference import SwinTExCo
+            if checkpoint_path is not None:
+                # Option 1: Load fully pretrained model
+                from inference import SwinTExCo
 
-            model = SwinTExCo(
-                weights_path=checkpoint_path,
-                device=self.device
-            )
+                model = SwinTExCo(
+                    weights_path=checkpoint_path,
+                    device=self.device
+                )
+                print("  ✓ Loaded pretrained embed_net, nonlocal_net, colornet")
+            else:
+                # Option 2: Pretrained Swin backbone + Random NonLocalNet
+                from src.models.vit.embed import SwinModel
+                from src.models.CNN.NonlocalNet import WarpNet
+                from src.models.CNN.ColorVidNet import ColorVidNet
+                from src.utils import RGB2Lab, ToTensor, Normalize
+                import torchvision.transforms as T
 
-            # Unfreeze for joint training
+                # Create a pseudo-SwinTExCo object
+                class SwinTExCoWrapper:
+                    def __init__(self, embed_net, nonlocal_net, colornet, processor):
+                        self.embed_net = embed_net
+                        self.nonlocal_net = nonlocal_net
+                        self.colornet = colornet
+                        self.processor = processor
+                        self.device = embed_net.device
+
+                # Load pretrained Swin Transformer backbone
+                embed_net = SwinModel(
+                    pretrained_model='swinv2-cr-t-224',
+                    device=self.device
+                ).to(self.device)
+                print("  ✓ Loaded pretrained Swin backbone (swinv2-cr-t-224)")
+
+                # Random initialize NonLocalNet
+                nonlocal_net = WarpNet(feature_channel=128).to(self.device)
+                print("  ⚠️  NonLocalNet randomly initialized (will be trained)")
+
+                # Random initialize ColorVidNet (will be frozen anyway)
+                colornet = ColorVidNet(4).to(self.device)
+                print("  ✓ ColorVidNet randomly initialized (frozen)")
+
+                # Create processor
+                processor = T.Compose([
+                    RGB2Lab(),
+                    ToTensor(),
+                    Normalize()
+                ])
+
+                # Wrap into pseudo-SwinTExCo object
+                model = SwinTExCoWrapper(embed_net, nonlocal_net, colornet, processor)
+
+            # Set trainable/frozen status
             for param in model.embed_net.parameters():
                 param.requires_grad = False
             for param in model.nonlocal_net.parameters():
@@ -150,7 +206,7 @@ class FusionSystem(nn.Module):
             for param in model.colornet.parameters():
                 param.requires_grad = False
 
-            # Set to train mode
+            # Set train/eval modes
             model.embed_net.eval()
             model.nonlocal_net.train()
             model.colornet.eval()

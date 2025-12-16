@@ -4,7 +4,7 @@ Fusion Training Script
 Sequential training mode: processes 4-frame sequences with MemFlow memory accumulation.
 
 Usage:
-    # Train from scratch
+    # Train with pretrained SwinTExCo
     python train/train.py \
         --memflow_path MemFlow \
         --swintexco_path SwinSingle \
@@ -15,12 +15,22 @@ Usage:
         --batch_size 2 \
         --epochs 50
 
+    # Train WITHOUT pretrained SwinTExCo (random NonLocalNet + pretrained Swin backbone)
+    python train/train.py \
+        --memflow_path MemFlow \
+        --swintexco_path SwinSingle \
+        --memflow_ckpt MemFlow/ckpt/memflow_colorization.pth \
+        --dataset /path/to/dataset1,/path/to/dataset2 \
+        --imagenet /path/to/imagenet \
+        --batch_size 2 \
+        --epochs 50
+        # Note: --swintexco_ckpt is optional (defaults to None)
+
     # Resume training from checkpoint
     python train/train.py \
         --memflow_path MemFlow \
         --swintexco_path SwinSingle \
         --memflow_ckpt MemFlow/ckpt/memflow_colorization.pth \
-        --swintexco_ckpt SwinSingle/ckpt/epoch_1 \
         --dataset /path/to/dataset1,/path/to/dataset2 \
         --imagenet /path/to/imagenet \
         --batch_size 2 \
@@ -294,8 +304,8 @@ def main():
                         help='Path to SwinSingle repository')
     parser.add_argument('--memflow_ckpt', type=str, required=True,
                         help='Path to MemFlow checkpoint')
-    parser.add_argument('--swintexco_ckpt', type=str, required=True,
-                        help='Path to SwinTExCo checkpoint directory')
+    parser.add_argument('--swintexco_ckpt', type=str, default=None,
+                        help='Path to SwinTExCo checkpoint directory (None for random NonLocalNet init)')
     parser.add_argument('--dataset', type=str, required=True,
                         help='Dataset path(s): single or comma-separated (e.g., /path1,/path2,/path3)')
     parser.add_argument('--imagenet', type=str, required=True,
