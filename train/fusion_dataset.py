@@ -553,10 +553,19 @@ class FusionSequenceDataset(Dataset):
                 reference = self._select_reference(ref_list)
             else:
                 # Use video first frame
-                first_frame_name = self.annotations[
-                    self.annotations['video_name'] == video_name
-                ].iloc[0]['current_frame']
-                reference = self._load_frame(video_name, str(first_frame_name), source_path)
+                try:
+                    video_frames = self.annotations[
+                        self.annotations['video_name'] == video_name
+                    ]
+                    if len(video_frames) > 0:
+                        first_frame_name = video_frames.iloc[0]['current_frame']
+                        reference = self._load_frame(video_name, str(first_frame_name), source_path)
+                    else:
+                        # Fallback: use current frame as reference
+                        reference = frame_pil
+                except (IndexError, KeyError) as e:
+                    # Fallback: use current frame as reference
+                    reference = frame_pil
 
             reference_resized = reference.resize(self.target_size[::-1], Image.LANCZOS)
             references_pil.append(reference_resized)
