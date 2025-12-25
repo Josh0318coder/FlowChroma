@@ -283,7 +283,17 @@ class FusionSequenceDataset(Dataset):
         imagenet_root,
         sequence_length=4,
         real_reference_probability=1.0,
-        target_size=(224, 224)
+        target_size=(224, 224),
+        # Reference image augmentation parameters
+        augment_reference=False,
+        augmentation_preset='moderate',
+        hue_range=30,
+        saturation_range=(0.7, 1.3),
+        brightness_range=(0.8, 1.2),
+        rgb_flip_prob=0.15,
+        horizontal_flip_prob=0.5,
+        tps_prob=0.3,
+        tps_strength=0.1
     ):
         import pandas as pd
 
@@ -293,6 +303,46 @@ class FusionSequenceDataset(Dataset):
         self.sequence_length = sequence_length
         self.real_reference_probability = real_reference_probability
         self.target_size = target_size
+
+        # Augmentation configuration
+        self.augment_reference = augment_reference
+        if augment_reference:
+            from train.augmentation import get_augmentation_config
+            # Use preset or custom parameters
+            if augmentation_preset in ['none', 'minimal', 'moderate', 'strong']:
+                self.augmentation_config = get_augmentation_config(
+                    preset=augmentation_preset,
+                    hue_range=hue_range,
+                    saturation_range=saturation_range,
+                    brightness_range=brightness_range,
+                    rgb_flip_prob=rgb_flip_prob,
+                    horizontal_flip_prob=horizontal_flip_prob,
+                    tps_prob=tps_prob,
+                    tps_strength=tps_strength
+                )
+            else:
+                # Custom configuration
+                self.augmentation_config = {
+                    'enabled': True,
+                    'color_jitter': True,
+                    'hue_range': hue_range,
+                    'saturation_range': saturation_range,
+                    'brightness_range': brightness_range,
+                    'rgb_flip_prob': rgb_flip_prob,
+                    'horizontal_flip_prob': horizontal_flip_prob,
+                    'tps_prob': tps_prob,
+                    'tps_strength': tps_strength
+                }
+            print(f"Reference augmentation enabled: {augmentation_preset}")
+            print(f"  Hue range: ±{hue_range}°")
+            print(f"  Saturation range: {saturation_range}")
+            print(f"  Brightness range: {brightness_range}")
+            print(f"  RGB flip prob: {rgb_flip_prob}")
+            print(f"  Horizontal flip prob: {horizontal_flip_prob}")
+            print(f"  TPS prob: {tps_prob} (strength: {tps_strength})")
+        else:
+            self.augmentation_config = {'enabled': False}
+            print("Reference augmentation disabled")
 
         print(f"Dataset paths: {self.davis_roots}")
         print(f"ImageNet paths: {self.imagenet_roots}")
@@ -499,6 +549,29 @@ class FusionSequenceDataset(Dataset):
         print(f"Warning: Reference not found in any path: {ref_path}")
         return Image.new('RGB', (256, 256), color='gray')
 
+    def _augment_reference(self, reference_image):
+        """
+        Apply augmentation to reference image
+
+        Only augments reference images, NOT target frames.
+        This prevents the model from memorizing reference colors/positions
+        while keeping training signals (L1, Perceptual, Temporal) stable.
+
+        Args:
+            reference_image: PIL Image (RGB)
+
+        Returns:
+            Augmented PIL Image (RGB)
+        """
+        from train.augmentation import augment_reference_image
+
+        try:
+            return augment_reference_image(reference_image, self.augmentation_config)
+        except Exception as e:
+            # Fallback: return original image if augmentation fails
+            print(f"Warning: Reference augmentation failed: {e}")
+            return reference_image
+
     def _rgb_to_lab_tensor(self, pil_image):
         """Convert PIL RGB image to LAB tensor (same as FusionDataset)"""
         rgb_np = np.array(pil_image, dtype=np.uint8)
@@ -566,6 +639,10 @@ class FusionSequenceDataset(Dataset):
                 except (IndexError, KeyError) as e:
                     # Fallback: use current frame as reference
                     reference = frame_pil
+
+            # Apply augmentation to reference image (before resizing)
+            if self.augment_reference:
+                reference = self._augment_reference(reference)
 
             reference_resized = reference.resize(self.target_size[::-1], Image.LANCZOS)
             references_pil.append(reference_resized)

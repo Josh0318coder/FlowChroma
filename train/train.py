@@ -26,6 +26,20 @@ Usage:
         --epochs 50
         # Note: --swintexco_ckpt is optional (defaults to None)
 
+    # Train with reference augmentation (prevents model from memorizing reference colors)
+    python train/train.py \
+        --memflow_path MemFlow \
+        --swintexco_path SwinSingle \
+        --memflow_ckpt MemFlow/ckpt/memflow_colorization.pth \
+        --swintexco_ckpt SwinSingle/ckpt/epoch_1 \
+        --dataset /path/to/dataset1,/path/to/dataset2 \
+        --imagenet /path/to/imagenet \
+        --batch_size 2 \
+        --epochs 50 \
+        --augment_reference \
+        --augmentation_preset moderate \
+        --real_reference_probability 0.1
+
     # Resume training from checkpoint
     python train/train.py \
         --memflow_path MemFlow \
@@ -311,6 +325,29 @@ def main():
     parser.add_argument('--imagenet', type=str, required=True,
                         help='ImageNet path(s): single or comma-separated (e.g., /path1,/path2,/path3)')
 
+    # Data Augmentation (reference images only)
+    parser.add_argument('--augment_reference', action='store_true',
+                        help='Enable reference image augmentation (prevents memorization)')
+    parser.add_argument('--augmentation_preset', type=str, default='moderate',
+                        choices=['none', 'minimal', 'moderate', 'strong'],
+                        help='Augmentation preset (none/minimal/moderate/strong)')
+    parser.add_argument('--hue_range', type=float, default=30,
+                        help='Hue shift range in degrees (default: 30)')
+    parser.add_argument('--saturation_range', type=float, nargs=2, default=[0.7, 1.3],
+                        help='Saturation range (default: 0.7 1.3)')
+    parser.add_argument('--brightness_range', type=float, nargs=2, default=[0.8, 1.2],
+                        help='Brightness range (default: 0.8 1.2)')
+    parser.add_argument('--rgb_flip_prob', type=float, default=0.15,
+                        help='RGB channel flip probability (default: 0.15)')
+    parser.add_argument('--horizontal_flip_prob', type=float, default=0.5,
+                        help='Horizontal flip probability (default: 0.5)')
+    parser.add_argument('--tps_prob', type=float, default=0.3,
+                        help='TPS transform probability (default: 0.3)')
+    parser.add_argument('--tps_strength', type=float, default=0.1,
+                        help='TPS deformation strength (default: 0.1)')
+    parser.add_argument('--real_reference_probability', type=float, default=0.1,
+                        help='Probability of using ImageNet (default: 0.1 = 90% same-scene)')
+
     # Training
     parser.add_argument('--batch_size', type=int, default=1,
                         help='Batch size (only 1 supported for now)')
@@ -437,7 +474,18 @@ def main():
         davis_root=args.dataset,
         imagenet_root=args.imagenet,
         sequence_length=args.sequence_length,
-        target_size=(args.target_size, args.target_size)
+        target_size=(args.target_size, args.target_size),
+        # Reference augmentation parameters
+        augment_reference=args.augment_reference,
+        augmentation_preset=args.augmentation_preset,
+        hue_range=args.hue_range,
+        saturation_range=tuple(args.saturation_range),
+        brightness_range=tuple(args.brightness_range),
+        rgb_flip_prob=args.rgb_flip_prob,
+        horizontal_flip_prob=args.horizontal_flip_prob,
+        tps_prob=args.tps_prob,
+        tps_strength=args.tps_strength,
+        real_reference_probability=args.real_reference_probability
     )
 
     train_loader = DataLoader(
