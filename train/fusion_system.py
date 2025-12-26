@@ -220,7 +220,8 @@ class FusionSystem(nn.Module):
 
     def reset_memory(self):
         """Reset MemFlow memory (call at start of each video)"""
-        self.memflow_memory = None
+        self.memflow_memory_keys = None
+        self.memflow_memory_values = None
         self.curr_ti = -1
 
     def memflow_inference(self, frame_t, frame_t1):
@@ -248,12 +249,14 @@ class FusionSystem(nn.Module):
             coords0, coords1, fmaps = self.memflow.encode_features(images_norm)
 
             # Memory management
-            if self.memflow_memory is None:
+            if self.memflow_memory_keys is None:
+                # First frame: no history
                 ref_values = None
                 ref_keys = key.unsqueeze(2)
             else:
-                ref_values = self.memflow_memory
-                ref_keys = torch.cat([self.memflow_memory, key.unsqueeze(2)], dim=2)
+                # Use historical keys and values
+                ref_values = self.memflow_memory_values
+                ref_keys = torch.cat([self.memflow_memory_keys, key.unsqueeze(2)], dim=2)
 
             # Predict flow with autocast (FlashAttention will get fp16 automatically)
             flow_predictions, current_value, confidence_map = self.memflow.predict_flow(
@@ -261,11 +264,13 @@ class FusionSystem(nn.Module):
                 query.unsqueeze(2), ref_keys, ref_values
             )
 
-            # Update memory
-            if self.memflow_memory is None:
-                self.memflow_memory = current_value
+            # Update memory: store both keys and values separately
+            if self.memflow_memory_keys is None:
+                self.memflow_memory_keys = key.unsqueeze(2)
+                self.memflow_memory_values = current_value
             else:
-                self.memflow_memory = torch.cat([self.memflow_memory, current_value], dim=2)
+                self.memflow_memory_keys = torch.cat([self.memflow_memory_keys, key.unsqueeze(2)], dim=2)
+                self.memflow_memory_values = torch.cat([self.memflow_memory_values, current_value], dim=2)
 
             # Get final flow
             flow_final = flow_predictions[-1]
