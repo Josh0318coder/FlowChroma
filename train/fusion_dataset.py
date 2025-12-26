@@ -310,18 +310,11 @@ class FusionSequenceDataset(Dataset):
             from train.augmentation import get_augmentation_config
             # Use preset or custom parameters
             if augmentation_preset in ['none', 'minimal', 'moderate', 'strong']:
-                self.augmentation_config = get_augmentation_config(
-                    preset=augmentation_preset,
-                    hue_range=hue_range,
-                    saturation_range=saturation_range,
-                    brightness_range=brightness_range,
-                    rgb_flip_prob=rgb_flip_prob,
-                    horizontal_flip_prob=horizontal_flip_prob,
-                    tps_prob=tps_prob,
-                    tps_strength=tps_strength
-                )
+                # Use preset configuration (don't override with argparse defaults to avoid conflicts)
+                self.augmentation_config = get_augmentation_config(preset=augmentation_preset)
+                print(f"Reference augmentation enabled: preset '{augmentation_preset}'")
             else:
-                # Custom configuration
+                # Custom configuration (use provided parameters)
                 self.augmentation_config = {
                     'enabled': True,
                     'color_jitter': True,
@@ -333,13 +326,15 @@ class FusionSequenceDataset(Dataset):
                     'tps_prob': tps_prob,
                     'tps_strength': tps_strength
                 }
-            print(f"Reference augmentation enabled: {augmentation_preset}")
-            print(f"  Hue range: ±{hue_range}°")
-            print(f"  Saturation range: {saturation_range}")
-            print(f"  Brightness range: {brightness_range}")
-            print(f"  RGB flip prob: {rgb_flip_prob}")
-            print(f"  Horizontal flip prob: {horizontal_flip_prob}")
-            print(f"  TPS prob: {tps_prob} (strength: {tps_strength})")
+                print(f"Reference augmentation enabled: custom configuration")
+
+            # Print actual configuration being used
+            print(f"  Hue range: ±{self.augmentation_config.get('hue_range', 0)}°")
+            print(f"  Saturation range: {self.augmentation_config.get('saturation_range', (1.0, 1.0))}")
+            print(f"  Brightness range: {self.augmentation_config.get('brightness_range', (1.0, 1.0))}")
+            print(f"  RGB flip prob: {self.augmentation_config.get('rgb_flip_prob', 0.0)}")
+            print(f"  Horizontal flip prob: {self.augmentation_config.get('horizontal_flip_prob', 0.0)}")
+            print(f"  TPS prob: {self.augmentation_config.get('tps_prob', 0.0)} (strength: {self.augmentation_config.get('tps_strength', 0.0)})")
         else:
             self.augmentation_config = {'enabled': False}
             print("Reference augmentation disabled")
