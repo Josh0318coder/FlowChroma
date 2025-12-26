@@ -35,7 +35,8 @@ class ColorizationInferenceCore:
     def clear_memory(self):
         """清空memory (每個新視頻開始時調用)"""
         self.curr_ti = -1
-        self.values = None  # Memory buffer
+        self.keys = None    # Store historical keys
+        self.values = None  # Store historical values
         
     def step(self, images_norm, query, key, net, inp, coords0, coords1, fmaps):
         """
@@ -65,7 +66,7 @@ class ColorizationInferenceCore:
             # 累積所有歷史keys + 當前key
             all_keys = []
             for ti in range(self.curr_ti):
-                all_keys.append(self.values[:, :, ti:ti+1])
+                all_keys.append(self.keys[:, :, ti:ti+1])
             all_keys.append(key.unsqueeze(2))
             ref_keys = torch.cat(all_keys, dim=2)
         else:
@@ -75,7 +76,7 @@ class ColorizationInferenceCore:
                 self.values[bi, :, indices[bi]] for bi in range(B)
             ], 0)
             ref_keys = torch.stack([
-                self.values[bi, :, indices[bi]] for bi in range(B)
+                self.keys[bi, :, indices[bi]] for bi in range(B)
             ], 0)
             ref_keys = torch.cat([ref_keys, key.unsqueeze(2)], dim=2)
         
@@ -94,10 +95,12 @@ class ColorizationInferenceCore:
         # 取最後一次迭代的結果
         flow_final = flow_predictions[-1]
 
-        # 累積memory value
-        if self.values is None:
+        # 累積memory (store keys and values separately)
+        if self.keys is None:
+            self.keys = key.unsqueeze(2)
             self.values = current_value
         else:
+            self.keys = torch.cat([self.keys, key.unsqueeze(2)], dim=2)
             self.values = torch.cat([self.values, current_value], dim=2)
 
         return flow_final, current_value, confidence_map
