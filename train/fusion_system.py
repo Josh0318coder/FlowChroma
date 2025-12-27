@@ -112,6 +112,9 @@ class FusionSystem(nn.Module):
             cfg = get_cfg()
             cfg.restore_ckpt = checkpoint_path
 
+            # Save num_ref_frames for memory management
+            self.num_ref_frames = cfg.num_ref_frames
+
             model = build_network(cfg).to(self.device)
 
             # Load checkpoint
@@ -248,13 +251,35 @@ class FusionSystem(nn.Module):
             # Encode features
             coords0, coords1, fmaps = self.memflow.encode_features(images_norm)
 
-            # Memory management
+            # Memory management with upper limit enforcement
             if self.memflow_keys is None:
+                # First frame (curr_ti=0): no historical references
                 ref_values = None
                 ref_keys = key.unsqueeze(2)
             else:
-                ref_values = self.memflow_values
-                ref_keys = torch.cat([self.memflow_keys, key.unsqueeze(2)], dim=2)
+                # Subsequent frames: apply num_ref_frames limit
+                if self.curr_ti < self.num_ref_frames:
+                    # curr_ti < num_ref_frames: use all accumulated historical frames
+                    ref_values = self.memflow_values
+                    ref_keys = torch.cat([self.memflow_keys, key.unsqueeze(2)], dim=2)
+                else:
+                    # curr_ti >= num_ref_frames: randomly sample (num_ref_frames - 1) historical frames
+                    B = key.shape[0]
+                    num_historical = self.memflow_keys.shape[2]  # Number of accumulated historical frames
+
+                    # Randomly sample indices for each batch
+                    indices = [torch.randperm(num_historical)[:self.num_ref_frames - 1] for _ in range(B)]
+
+                    # Sample ref_values and ref_keys
+                    ref_values = torch.stack([
+                        self.memflow_values[bi, :, indices[bi]] for bi in range(B)
+                    ], 0)
+                    ref_keys = torch.stack([
+                        self.memflow_keys[bi, :, indices[bi]] for bi in range(B)
+                    ], 0)
+
+                    # Append current frame's key
+                    ref_keys = torch.cat([ref_keys, key.unsqueeze(2)], dim=2)
 
             # Predict flow with autocast (FlashAttention will get fp16 automatically)
             flow_predictions, current_value, confidence_map = self.memflow.predict_flow(
@@ -262,13 +287,33 @@ class FusionSystem(nn.Module):
                 query.unsqueeze(2), ref_keys, ref_values
             )
 
-            # Update memory (store keys and values separately)
+            # Update memory with upper limit enforcement
             if self.memflow_keys is None:
+                # First frame: initialize memory
                 self.memflow_keys = key.unsqueeze(2)
                 self.memflow_values = current_value
             else:
-                self.memflow_keys = torch.cat([self.memflow_keys, key.unsqueeze(2)], dim=2)
-                self.memflow_values = torch.cat([self.memflow_values, current_value], dim=2)
+                # Subsequent frames: append current frame
+                updated_keys = torch.cat([self.memflow_keys, key.unsqueeze(2)], dim=2)
+                updated_values = torch.cat([self.memflow_values, current_value], dim=2)
+
+                # Enforce memory upper limit: keep at most (num_ref_frames - 1) historical frames
+                # This prevents unbounded memory growth in long sequences
+                num_accumulated = updated_keys.shape[2]
+                if num_accumulated > self.num_ref_frames - 1:
+                    # Randomly sample to maintain limit
+                    B = updated_keys.shape[0]
+                    indices = [torch.randperm(num_accumulated)[:self.num_ref_frames - 1] for _ in range(B)]
+
+                    self.memflow_keys = torch.stack([
+                        updated_keys[bi, :, indices[bi]] for bi in range(B)
+                    ], 0)
+                    self.memflow_values = torch.stack([
+                        updated_values[bi, :, indices[bi]] for bi in range(B)
+                    ], 0)
+                else:
+                    self.memflow_keys = updated_keys
+                    self.memflow_values = updated_values
 
             # Get final flow
             flow_final = flow_predictions[-1]
