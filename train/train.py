@@ -332,6 +332,8 @@ def main():
     # Loss Weights
     parser.add_argument('--lambda_temporal', type=float, default=0.5,
                         help='Weight for temporal loss (default: 0.5)')
+    parser.add_argument('--lambda_align', type=float, default=1.0,
+                        help='Weight for align component in adaptive temporal loss (default: 1.0)')
     parser.add_argument('--lambda_smooth', type=float, default=0.3,
                         help='Weight for smooth component in adaptive temporal loss (default: 0.3)')
     parser.add_argument('--use_adaptive_temporal', action='store_true', default=True,
@@ -388,6 +390,7 @@ def main():
         lambda_perceptual=0.0,
         lambda_contextual=0.015,  # 🔥 CRITICAL FIX: Reduced from 0.1 to 0.015 (SwinTExCo paper value)
         lambda_temporal=args.lambda_temporal,
+        lambda_align=args.lambda_align,
         lambda_smooth=args.lambda_smooth,
         use_temporal=True,
         use_adaptive_temporal=args.use_adaptive_temporal,

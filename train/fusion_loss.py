@@ -368,12 +368,14 @@ class AdaptiveTemporalLoss(nn.Module):
     This design addresses the limitation that video colorization lacks pre-computed optical flow,
     while ensuring both spatial alignment with MemFlow and temporal coherence across frames.
     """
-    def __init__(self, lambda_smooth=0.3):
+    def __init__(self, lambda_align=1.0, lambda_smooth=0.3):
         """
         Args:
+            lambda_align: Weight for the alignment loss (default: 1.0)
             lambda_smooth: Weight for the global smoothness loss (default: 0.3)
         """
         super().__init__()
+        self.lambda_align = lambda_align
         self.lambda_smooth = lambda_smooth
 
     def forward(self, fusion_t, fusion_t1, memflow_t, memflow_t1,
@@ -413,10 +415,12 @@ class AdaptiveTemporalLoss(nn.Module):
         # This prevents flickering even in low-confidence areas where SwinTExCo dominates
         smooth_loss = torch.abs(fusion_t1 - fusion_t).mean()
 
-        # Combine both losses
-        total_loss = align_loss + self.lambda_smooth * smooth_loss
+        # Combine both losses (with weights)
+        weighted_align = self.lambda_align * align_loss
+        weighted_smooth = self.lambda_smooth * smooth_loss
+        total_loss = weighted_align + weighted_smooth
 
-        return total_loss, align_loss, smooth_loss
+        return total_loss, weighted_align, weighted_smooth
 
 
 class FusionLoss(nn.Module):
@@ -441,6 +445,7 @@ class FusionLoss(nn.Module):
                  lambda_perceptual=0.05,
                  lambda_contextual=0.015,  # SwinTExCo paper uses 0.015, not 0.5!
                  lambda_temporal=0.5,
+                 lambda_align=1.0,  # Weight for align component in adaptive temporal loss
                  lambda_smooth=0.3,  # Weight for smooth component in adaptive temporal loss
                  use_temporal=True,
                  use_swin_contextual=True,  # Use Swin-based contextual loss
@@ -469,7 +474,7 @@ class FusionLoss(nn.Module):
         if use_temporal:
             if use_adaptive_temporal:
                 # Use new adaptive temporal loss (no optical flow required)
-                self.temporal_loss = AdaptiveTemporalLoss(lambda_smooth=lambda_smooth)
+                self.temporal_loss = AdaptiveTemporalLoss(lambda_align=lambda_align, lambda_smooth=lambda_smooth)
             else:
                 # Use old optical flow-based temporal loss
                 self.temporal_loss = TemporalLoss()
