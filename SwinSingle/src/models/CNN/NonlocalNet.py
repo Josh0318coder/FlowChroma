@@ -1,4 +1,5 @@
 import sys
+import math
 import torch
 import torch.nn as nn
 import time
@@ -421,13 +422,19 @@ class WarpNet(nn.Module):
             f = f.detach()
 
         f_similarity = f.unsqueeze_(dim=1)
-        similarity_map = torch.max(f_similarity, -1, keepdim=True)[0]
-        similarity_map = similarity_map.view(batch_size, 1, feature_height, feature_width)
 
         # f can be negative
         f_WTA = f if WTA_scale_weight == 1 else WTA_scale.apply(f, WTA_scale_weight)
         f_WTA = f_WTA / temperature
         f_div_C = F.softmax(f_WTA.squeeze_(), dim=-1)  # 2*1936*1936;
+
+        # Entropy-based confidence (aligned with MemFlow's confidence calculation)
+        # High entropy = uncertain matching = low confidence
+        # Low entropy = certain matching = high confidence
+        entropy = -(f_div_C * torch.log(f_div_C + 1e-10)).sum(dim=-1, keepdim=True)
+        max_entropy = math.log(f_div_C.shape[-1])  # log(N) where N is number of reference positions
+        similarity_map = 1.0 - entropy / max_entropy  # Normalize to [0, 1]
+        similarity_map = similarity_map.view(batch_size, 1, feature_height, feature_width)
 
         # downsample the reference color
         B_lab = F.avg_pool2d(B_lab_map, 4)
