@@ -481,7 +481,8 @@ class FusionLoss(nn.Module):
 
     def forward(self, pred_ab, gt_ab, flow=None, mask=None, prev_pred_ab=None,
                 frame_idx=None, pred_lab=None, reference_lab=None, embed_net=None,
-                memflow_ab=None, memflow_conf=None, prev_memflow_ab=None, prev_memflow_conf=None):
+                memflow_ab=None, memflow_conf=None, prev_memflow_ab=None, prev_memflow_conf=None,
+                swintexco_ab=None, swintexco_conf=None):
         """
         Compute total loss
 
@@ -499,13 +500,21 @@ class FusionLoss(nn.Module):
             memflow_conf: [B, 1, H, W] MemFlow confidence (for adaptive temporal loss)
             prev_memflow_ab: [B, 2, H, W] previous MemFlow AB (for adaptive temporal loss)
             prev_memflow_conf: [B, 1, H, W] previous MemFlow confidence (for adaptive temporal loss)
+            swintexco_ab: [B, 2, H, W] SwinTExCo AB output (for weighted L1 loss)
+            swintexco_conf: [B, 1, H, W] SwinTExCo confidence (for weighted L1 loss)
 
         Returns:
             total_loss: scalar
             loss_dict: dictionary of individual losses
         """
-        # L1 Loss
-        loss_l1 = self.l1_loss(pred_ab, gt_ab)
+        # L1 Loss (weighted by SwinTExCo confidence if available)
+        if swintexco_ab is not None and swintexco_conf is not None:
+            # Weighted L1: only trust SwinTExCo in high-confidence regions
+            l1_pixel = torch.abs(pred_ab - swintexco_ab)  # [B, 2, H, W]
+            loss_l1 = (swintexco_conf * l1_pixel).mean()
+        else:
+            # Fallback to original L1 with GT
+            loss_l1 = self.l1_loss(pred_ab, gt_ab)
 
         # Perceptual Loss
         loss_perceptual = self.perceptual_loss(pred_ab, gt_ab)

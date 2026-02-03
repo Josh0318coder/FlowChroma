@@ -386,13 +386,13 @@ class FusionSystem(nn.Module):
             frames_lab: list of [3, H, W] LAB tensors (normalized to [-1, 1])
             frames_pil: list of PIL Images (RGB, target frames)
             reference_pil: Single PIL Image (RGB, shared reference for entire sequence)
-            return_memflow: bool, whether to return MemFlow outputs (for temporal loss in training)
+            return_memflow: bool, whether to return MemFlow/SwinTExCo outputs (for loss in training)
 
         Returns:
             If return_memflow=False:
                 results: list of [3, H, W] LAB tensors (colorized results)
             If return_memflow=True:
-                (results, memflow_outputs, memflow_confs): tuple of lists
+                (results, memflow_outputs, memflow_confs, swintexco_outputs, swintexco_confs): tuple of lists
         """
         # Reset memory at the start of sequence
         self.reset_memory()
@@ -400,6 +400,8 @@ class FusionSystem(nn.Module):
         results = []
         memflow_outputs = [] if return_memflow else None
         memflow_confs = [] if return_memflow else None
+        swintexco_outputs = [] if return_memflow else None
+        swintexco_confs = [] if return_memflow else None
 
         # Cache reference features once for the entire sequence (computed on first frame)
         cached_ref_features = None
@@ -478,9 +480,9 @@ class FusionSystem(nn.Module):
                 # frame_t_batch = prev_output.unsqueeze(0)  # No detach - gradients flow through
 
                 # Forward pass (curr_ti will be managed automatically)
-                # If return_memflow is True, we need to capture MemFlow outputs
+                # If return_memflow is True, we need to capture MemFlow and SwinTExCo outputs
                 if return_memflow:
-                    output_lab, memflow_lab, memflow_conf = self.forward_with_memflow(
+                    output_lab, memflow_lab, memflow_conf, swintexco_ab, swintexco_sim = self.forward_with_memflow(
                         frame_t_batch,
                         frame_t1_batch,
                         reference_pil,
@@ -498,12 +500,16 @@ class FusionSystem(nn.Module):
                     # Set dummy values (won't be used)
                     memflow_lab = None
                     memflow_conf = None
+                    swintexco_ab = None
+                    swintexco_sim = None
 
-            # Store MemFlow outputs if requested
+            # Store MemFlow and SwinTExCo outputs if requested
             if return_memflow:
                 # Remove batch dimension and store
                 memflow_outputs.append(memflow_lab.squeeze(0))
                 memflow_confs.append(memflow_conf.squeeze(0))
+                swintexco_outputs.append(swintexco_ab.squeeze(0))
+                swintexco_confs.append(swintexco_sim.squeeze(0))
 
             # Remove batch dimension
             # Keep on device for training (gradient computation)
@@ -514,7 +520,7 @@ class FusionSystem(nn.Module):
                 results.append(output_lab.squeeze(0).cpu())
 
         if return_memflow:
-            return results, memflow_outputs, memflow_confs
+            return results, memflow_outputs, memflow_confs, swintexco_outputs, swintexco_confs
         else:
             return results
 
@@ -609,7 +615,7 @@ class FusionSystem(nn.Module):
 
     def forward_with_memflow(self, frame_t, frame_t1, reference_pil, target_pil, cached_ref_features=None):
         """
-        Complete forward pass that also returns MemFlow outputs (for temporal loss)
+        Complete forward pass that also returns MemFlow and SwinTExCo outputs (for loss computation)
 
         Args:
             frame_t: [B, 3, H, W] LAB tensor (normalized)
@@ -622,6 +628,8 @@ class FusionSystem(nn.Module):
             fused_lab: [B, 3, H, W] - Complete LAB prediction at full resolution
             memflow_lab: [B, 3, H/4, W/4] - MemFlow LAB output at 56×56
             memflow_conf: [B, 1, H/4, W/4] - MemFlow confidence at 56×56
+            swintexco_ab: [B, 2, H/4, W/4] - SwinTExCo AB output at 56×56
+            swintexco_conf: [B, 1, H/4, W/4] - SwinTExCo confidence at 56×56
         """
         B, _, H, W = frame_t1.shape
         H_small, W_small = H // 4, W // 4  # 56×56 for 224 input
@@ -668,7 +676,7 @@ class FusionSystem(nn.Module):
         # Construct complete LAB output at full resolution
         fused_lab = torch.cat([L_channel, fused_ab_full], dim=1)
 
-        return fused_lab, memflow_lab, memflow_conf
+        return fused_lab, memflow_lab, memflow_conf, swintexco_ab, swintexco_sim
 
     def forward(self, frame_t, frame_t1, reference_pil, target_pil, cached_ref_features=None):
         """

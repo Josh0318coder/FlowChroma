@@ -88,15 +88,11 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
 
             # Process sequence with forward_sequence (reference is shared and cached)
             with autocast(enabled=args.use_amp):
-                # Forward sequence: returns (outputs, memflow_outputs, memflow_confs) if return_memflow=True
-                if criterion.use_temporal and criterion.use_adaptive_temporal:
-                    outputs, memflow_outputs, memflow_confs = system.forward_sequence(
-                        frames_lab, frames_pil, reference_pil, return_memflow=True
-                    )
-                else:
-                    outputs = system.forward_sequence(frames_lab, frames_pil, reference_pil)
-                    memflow_outputs = None
-                    memflow_confs = None
+                # Forward sequence: returns (outputs, memflow_outputs, memflow_confs, swintexco_outputs, swintexco_confs) if return_memflow=True
+                # Always use return_memflow=True to get SwinTExCo outputs for weighted L1 loss
+                outputs, memflow_outputs, memflow_confs, swintexco_outputs, swintexco_confs = system.forward_sequence(
+                    frames_lab, frames_pil, reference_pil, return_memflow=True
+                )
 
                 # Compute loss for each frame in the sequence
                 frame_losses = []
@@ -134,6 +130,18 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                         memflow_ab = None
                         memflow_conf = None
 
+                    # Prepare SwinTExCo outputs for weighted L1 loss
+                    # SwinTExCo outputs are at 56×56, need to upsample to full resolution
+                    H, W = output_ab.shape[2], output_ab.shape[3]
+                    swintexco_ab_small = swintexco_outputs[i].unsqueeze(0)  # [1, 2, 56, 56]
+                    swintexco_conf_small = swintexco_confs[i].unsqueeze(0)  # [1, 1, 56, 56]
+                    swintexco_ab = nn.functional.interpolate(
+                        swintexco_ab_small, size=(H, W), mode='bilinear', align_corners=True
+                    )
+                    swintexco_conf = nn.functional.interpolate(
+                        swintexco_conf_small, size=(H, W), mode='bilinear', align_corners=True
+                    )
+
                     # Compute loss with all components
                     loss, loss_dict = criterion(
                         output_ab, gt_ab,
@@ -146,7 +154,10 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                         memflow_ab=memflow_ab,
                         memflow_conf=memflow_conf,
                         prev_memflow_ab=prev_memflow_ab,
-                        prev_memflow_conf=prev_memflow_conf
+                        prev_memflow_conf=prev_memflow_conf,
+                        # Weighted L1 loss parameters
+                        swintexco_ab=swintexco_ab,
+                        swintexco_conf=swintexco_conf
                     )
 
                     # GAN Loss (only compute on frame 0, following SwinSingle and contextual loss strategy)
