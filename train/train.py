@@ -103,13 +103,15 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                     output_ab = output_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
                     gt_ab = gt_lab[1:3, :, :].unsqueeze(0)  # [1, 2, H, W]
 
+                    # Prepare LAB batches for perceptual loss (all frames)
+                    output_lab_batch = output_lab.unsqueeze(0)  # [1, 3, H, W]
+                    gt_lab_batch = gt_lab.unsqueeze(0)  # [1, 3, H, W]
+
                     # Prepare for Swin Contextual Loss (only needed for frame 0)
                     if i == 0:
-                        output_lab_batch = output_lab.unsqueeze(0)  # [1, 3, H, W]
                         reference_lab_batch = system.swintexco.processor(reference_pil).unsqueeze(0).to(args.device)
                         embed_net = system.swintexco.embed_net
                     else:
-                        output_lab_batch = None
                         reference_lab_batch = None
                         embed_net = None
 
@@ -147,6 +149,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                         output_ab, gt_ab,
                         frame_idx=i,
                         pred_lab=output_lab_batch,
+                        gt_lab=gt_lab_batch,
                         reference_lab=reference_lab_batch,
                         embed_net=embed_net,
                         # Adaptive temporal loss parameters

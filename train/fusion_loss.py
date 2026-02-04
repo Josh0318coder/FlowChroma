@@ -40,18 +40,18 @@ class PerceptualLoss(nn.Module):
         self.to(device)
         self.eval()
 
-    def forward(self, pred, target):
+    def forward(self, pred_lab, gt_lab):
         """
         Args:
-            pred: [B, 2, H, W] AB channels
-            target: [B, 2, H, W] AB channels
+            pred_lab: [B, 3, H, W] LAB channels (normalized to [-1, 1])
+            gt_lab: [B, 3, H, W] LAB channels (normalized to [-1, 1])
 
         Returns:
             loss: scalar
         """
-        # Convert AB to RGB (approximate for VGG)
-        pred_rgb = self._ab_to_rgb_approx(pred)
-        target_rgb = self._ab_to_rgb_approx(target)
+        # Convert LAB to RGB (proper conversion)
+        pred_rgb = self._lab_to_rgb(pred_lab)
+        target_rgb = self._lab_to_rgb(gt_lab)
 
         loss = 0.0
         for layer in self.vgg_layers.values():
@@ -61,16 +61,27 @@ class PerceptualLoss(nn.Module):
 
         return loss / len(self.vgg_layers)
 
-    def _ab_to_rgb_approx(self, ab):
-        """Approximate AB to RGB conversion for VGG (from local-2)"""
-        # Simple approximation: use L=0 and normalize to [0, 1]
-        # This is not true LAB->RGB conversion, but works for VGG perceptual loss
-        b, _, h, w = ab.shape
-        L = torch.zeros(b, 1, h, w, device=ab.device, dtype=ab.dtype)
-        lab = torch.cat([L, ab], dim=1)
+    def _lab_to_rgb(self, lab):
+        """
+        Proper LAB to RGB conversion for VGG
 
-        # Normalize to [0, 1] range for VGG
-        rgb = (lab + 1.0) / 2.0
+        Args:
+            lab: [B, 3, H, W] LAB (normalized to [-1, 1])
+
+        Returns:
+            rgb: [B, 3, H, W] RGB (range [0, 1])
+        """
+        from src.utils import uncenter_l, uncenter_ab, tensor_lab2rgb
+
+        # Uncenter L channel (from [-1, 1] to [0, 100])
+        l = uncenter_l(lab[:, 0:1, :, :])
+        # Uncenter AB channels (from [-1, 1] to [-127, 127])
+        ab = uncenter_ab(lab[:, 1:3, :, :])
+
+        # Convert to RGB [0, 1]
+        with torch.cuda.amp.autocast(enabled=False):
+            rgb = tensor_lab2rgb(torch.cat([l, ab], dim=1).float())
+
         return rgb
 
 
@@ -480,7 +491,7 @@ class FusionLoss(nn.Module):
                 self.temporal_loss = TemporalLoss()
 
     def forward(self, pred_ab, gt_ab, flow=None, mask=None, prev_pred_ab=None,
-                frame_idx=None, pred_lab=None, reference_lab=None, embed_net=None,
+                frame_idx=None, pred_lab=None, gt_lab=None, reference_lab=None, embed_net=None,
                 memflow_ab=None, memflow_conf=None, prev_memflow_ab=None, prev_memflow_conf=None,
                 swintexco_ab=None, swintexco_conf=None):
         """
@@ -493,7 +504,8 @@ class FusionLoss(nn.Module):
             mask: [B, 1, H, W] valid mask (for old temporal loss)
             prev_pred_ab: [B, 2, H, W] previous frame prediction (for old temporal loss)
             frame_idx: int, frame index in sequence (for Swin contextual loss)
-            pred_lab: [B, 3, H, W] predicted LAB (for Swin contextual loss)
+            pred_lab: [B, 3, H, W] predicted LAB (for Swin contextual loss and perceptual loss)
+            gt_lab: [B, 3, H, W] ground truth LAB (for perceptual loss)
             reference_lab: [B, 3, H, W] reference image LAB (for Swin contextual loss)
             embed_net: Swin model for feature extraction (for Swin contextual loss)
             memflow_ab: [B, 2, H, W] MemFlow AB output (for adaptive temporal loss)
@@ -516,8 +528,12 @@ class FusionLoss(nn.Module):
             # Fallback to original L1 with GT
             loss_l1 = self.l1_loss(pred_ab, gt_ab)
 
-        # Perceptual Loss
-        loss_perceptual = self.perceptual_loss(pred_ab, gt_ab)
+        # Perceptual Loss (using proper LAB→RGB conversion)
+        if pred_lab is not None and gt_lab is not None:
+            loss_perceptual = self.perceptual_loss(pred_lab, gt_lab)
+        else:
+            # Fallback: skip perceptual loss if LAB not provided
+            loss_perceptual = torch.tensor(0.0, device=pred_ab.device)
 
         # Total loss
         total_loss = (
