@@ -169,48 +169,35 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
 
                     if i == 0 and discriminator is not None and args.weight_gan > 0:
                         # Prepare LAB images for discriminator (need to uncenter L channel)
-                        # Clone to avoid in-place operation conflicts with main loss backward
                         from src.utils import uncenter_l
                         fake_data_lab = torch.cat((
-                            uncenter_l(output_lab[0:1, :, :].unsqueeze(0).clone()),  # Clone to avoid conflicts
-                            output_ab.clone()  # Clone to avoid conflicts
+                            uncenter_l(output_lab[0:1, :, :].unsqueeze(0)),
+                            output_ab
                         ), dim=1)  # [1, 3, H, W]
 
                         real_data_lab = torch.cat((
-                            uncenter_l(gt_lab[0:1, :, :].unsqueeze(0)),  # Uncenter L
-                            gt_ab  # AB from ground truth
+                            uncenter_l(gt_lab[0:1, :, :].unsqueeze(0)),
+                            gt_ab
                         ), dim=1)  # [1, 3, H, W]
 
                         with autocast(enabled=False):
                             fake_data_lab_fp32 = fake_data_lab.float()
                             real_data_lab_fp32 = real_data_lab.float()
 
-                            # Discriminator training: detach fake INPUT to stop gradients to generator
-                            y_pred_fake_d, _ = discriminator(fake_data_lab_fp32.detach())
-                            y_pred_real_d, _ = discriminator(real_data_lab_fp32)
-
-                            y = torch.ones_like(y_pred_real_d)
-                            discriminator_loss = (
-                                torch.mean((y_pred_real_d - torch.mean(y_pred_fake_d) - y) ** 2)
-                                + torch.mean((y_pred_fake_d - torch.mean(y_pred_real_d) + y) ** 2)
-                            ) / 2
+                            # Discriminator training (both inputs detached inside discriminator_loss_fn)
+                            discriminator_loss = discriminator_loss_fn(
+                                real_data_lab_fp32, fake_data_lab_fp32, discriminator
+                            )
                             discriminator_loss.backward()
                             optimizer_d.step()
                             optimizer_d.zero_grad()
 
                             # Generator training (only after epoch_train_discriminator)
                             if epoch > args.epoch_train_discriminator:
-                                # Forward pass for generator loss (no detach on fake to allow gradients)
-                                y_pred_fake_g, _ = discriminator(fake_data_lab_fp32)
-                                y_pred_real_g, _ = discriminator(real_data_lab_fp32.detach())
-
-                                generator_loss = (
-                                    (
-                                        torch.mean((y_pred_real_g - torch.mean(y_pred_fake_g) + y) ** 2)
-                                        + torch.mean((y_pred_fake_g - torch.mean(y_pred_real_g) - y) ** 2)
-                                    )
-                                    / 2
-                                    * args.weight_gan
+                                # Generator loss (no detach inside, allows gradients to flow)
+                                generator_loss = generator_loss_fn(
+                                    real_data_lab_fp32, fake_data_lab_fp32,
+                                    discriminator, args.weight_gan, args.device
                                 )
                                 loss = loss + generator_loss  # Add to total generator loss
 
