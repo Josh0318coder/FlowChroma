@@ -73,6 +73,9 @@ class PerceptualLoss(nn.Module):
         """
         from src.utils import uncenter_l, uncenter_ab, tensor_lab2rgb
 
+        # Clone to avoid in-place operation issues with GAN loss
+        lab = lab.clone()
+
         # Uncenter L channel (from [-1, 1] to [0, 100])
         l = uncenter_l(lab[:, 0:1, :, :])
         # Uncenter AB channels (from [-1, 1] to [-127, 127])
