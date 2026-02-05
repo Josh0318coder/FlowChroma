@@ -8,69 +8,7 @@ and Self-Attention.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import Parameter
-
-
-def l2normalize(v, eps=1e-12):
-    """L2 normalization for spectral normalization"""
-    return v / (v.norm() + eps)
-
-
-class SpectralNorm(nn.Module):
-    """Spectral Normalization wrapper"""
-    def __init__(self, module, name="weight", power_iterations=1):
-        super(SpectralNorm, self).__init__()
-        self.module = module
-        self.name = name
-        self.power_iterations = power_iterations
-        if not self._made_params():
-            self._make_params()
-
-    def _update_u_v(self):
-        u = getattr(self.module, self.name + "_u")
-        v = getattr(self.module, self.name + "_v")
-        w = getattr(self.module, self.name + "_bar")
-
-        height = w.data.shape[0]
-        for _ in range(self.power_iterations):
-            v.data = l2normalize(torch.mv(torch.t(w.view(height, -1).data), u.data))
-            u.data = l2normalize(torch.mv(w.view(height, -1).data, v.data))
-
-        sigma = u.dot(w.view(height, -1).mv(v))
-        setattr(self.module, self.name, w / sigma.expand_as(w))
-
-    def _made_params(self):
-        try:
-            u = getattr(self.module, self.name + "_u")
-            v = getattr(self.module, self.name + "_v")
-            w = getattr(self.module, self.name + "_bar")
-            return True
-        except AttributeError:
-            return False
-
-    def _make_params(self):
-        w = getattr(self.module, self.name)
-
-        height = w.data.shape[0]
-        width = w.view(height, -1).data.shape[1]
-
-        u = Parameter(w.data.new(height).normal_(0, 1), requires_grad=False)
-        v = Parameter(w.data.new(width).normal_(0, 1), requires_grad=False)
-        u.data = l2normalize(u.data)
-        v.data = l2normalize(v.data)
-        w_bar = Parameter(w.data)
-
-        del self.module._parameters[self.name]
-
-        self.module.register_parameter(self.name + "_u", u)
-        self.module.register_parameter(self.name + "_v", v)
-        self.module.register_parameter(self.name + "_bar", w_bar)
-
-    def forward(self, *args):
-        # Only update spectral norm during training to avoid in-place operation issues
-        if self.training:
-            self._update_u_v()
-        return self.module.forward(*args)
+from torch.nn.utils import spectral_norm
 
 
 class SelfAttention(nn.Module):
@@ -80,9 +18,9 @@ class SelfAttention(nn.Module):
         super(SelfAttention, self).__init__()
         self.chanel_in = in_dim
 
-        self.query_conv = SpectralNorm(nn.Conv2d(in_channels=in_dim, out_channels=in_dim // 1, kernel_size=1))
-        self.key_conv = SpectralNorm(nn.Conv2d(in_channels=in_dim, out_channels=in_dim // 1, kernel_size=1))
-        self.value_conv = SpectralNorm(nn.Conv2d(in_channels=in_dim, out_channels=in_dim, kernel_size=1))
+        self.query_conv = spectral_norm(nn.Conv2d(in_channels=in_dim, out_channels=in_dim // 1, kernel_size=1))
+        self.key_conv = spectral_norm(nn.Conv2d(in_channels=in_dim, out_channels=in_dim // 1, kernel_size=1))
+        self.value_conv = spectral_norm(nn.Conv2d(in_channels=in_dim, out_channels=in_dim, kernel_size=1))
         self.gamma = nn.Parameter(torch.zeros(1))
 
         self.softmax = nn.Softmax(dim=-1)
@@ -128,12 +66,12 @@ class Discriminator(nn.Module):
         self.ndf = ndf
 
         self.layer1 = nn.Sequential(
-            SpectralNorm(nn.Conv2d(self.in_channels, self.ndf, 4, 2, 1)),
+            spectral_norm(nn.Conv2d(self.in_channels, self.ndf, 4, 2, 1)),
             nn.LeakyReLU(0.2, inplace=False)
         )
 
         self.layer2 = nn.Sequential(
-            SpectralNorm(nn.Conv2d(self.ndf, self.ndf, 4, 2, 1)),
+            spectral_norm(nn.Conv2d(self.ndf, self.ndf, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf),
             nn.LeakyReLU(0.2, inplace=False),
         )
@@ -141,30 +79,30 @@ class Discriminator(nn.Module):
         self.attention = SelfAttention(self.ndf)
 
         self.layer3 = nn.Sequential(
-            SpectralNorm(nn.Conv2d(self.ndf, self.ndf * 2, 4, 2, 1)),
+            spectral_norm(nn.Conv2d(self.ndf, self.ndf * 2, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 2),
             nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.layer4 = nn.Sequential(
-            SpectralNorm(nn.Conv2d(self.ndf * 2, self.ndf * 4, 4, 2, 1)),
+            spectral_norm(nn.Conv2d(self.ndf * 2, self.ndf * 4, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 4),
             nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.layer5 = nn.Sequential(
-            SpectralNorm(nn.Conv2d(self.ndf * 4, self.ndf * 8, 4, 2, 1)),
+            spectral_norm(nn.Conv2d(self.ndf * 4, self.ndf * 8, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 8),
             nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.layer6 = nn.Sequential(
-            SpectralNorm(nn.Conv2d(self.ndf * 8, self.ndf * 16, 4, 2, 1)),
+            spectral_norm(nn.Conv2d(self.ndf * 8, self.ndf * 16, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 16),
             nn.LeakyReLU(0.2, inplace=False),
         )
 
-        self.last = SpectralNorm(nn.Conv2d(self.ndf * 16, 1, [3, 3], 1, 0))
+        self.last = spectral_norm(nn.Conv2d(self.ndf * 16, 1, [3, 3], 1, 0))
 
     def forward(self, input):
         """

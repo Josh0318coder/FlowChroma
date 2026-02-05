@@ -200,11 +200,9 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
 
                             # Generator training (only after epoch_train_discriminator)
                             if epoch > args.epoch_train_discriminator:
-                                # Use eval mode to prevent SpectralNorm in-place updates
-                                discriminator.eval()
+                                # Forward pass for generator loss (no detach on fake to allow gradients)
                                 y_pred_fake_g, _ = discriminator(fake_data_lab_fp32)
                                 y_pred_real_g, _ = discriminator(real_data_lab_fp32.detach())
-                                discriminator.train()
 
                                 generator_loss = (
                                     (
