@@ -181,32 +181,35 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                             gt_ab  # AB from ground truth
                         ), dim=1)  # [1, 3, H, W]
 
-                        # Single forward pass through discriminator to avoid SpectralNorm in-place issues
                         with autocast(enabled=False):
                             fake_data_lab_fp32 = fake_data_lab.float()
                             real_data_lab_fp32 = real_data_lab.float()
 
-                            # Forward pass once
-                            y_pred_fake, _ = discriminator(fake_data_lab_fp32)
-                            y_pred_real, _ = discriminator(real_data_lab_fp32)
+                            # Discriminator training: detach fake INPUT to stop gradients to generator
+                            y_pred_fake_d, _ = discriminator(fake_data_lab_fp32.detach())
+                            y_pred_real_d, _ = discriminator(real_data_lab_fp32)
 
-                            y = torch.ones_like(y_pred_real)
-
-                            # Discriminator loss (use detached predictions)
+                            y = torch.ones_like(y_pred_real_d)
                             discriminator_loss = (
-                                torch.mean((y_pred_real.detach() - torch.mean(y_pred_fake.detach()) - y) ** 2)
-                                + torch.mean((y_pred_fake.detach() - torch.mean(y_pred_real.detach()) + y) ** 2)
+                                torch.mean((y_pred_real_d - torch.mean(y_pred_fake_d) - y) ** 2)
+                                + torch.mean((y_pred_fake_d - torch.mean(y_pred_real_d) + y) ** 2)
                             ) / 2
                             discriminator_loss.backward()
                             optimizer_d.step()
                             optimizer_d.zero_grad()
 
-                            # Generator loss (use original predictions, only after epoch_train_discriminator)
+                            # Generator training (only after epoch_train_discriminator)
                             if epoch > args.epoch_train_discriminator:
+                                # Use eval mode to prevent SpectralNorm in-place updates
+                                discriminator.eval()
+                                y_pred_fake_g, _ = discriminator(fake_data_lab_fp32)
+                                y_pred_real_g, _ = discriminator(real_data_lab_fp32.detach())
+                                discriminator.train()
+
                                 generator_loss = (
                                     (
-                                        torch.mean((y_pred_real - torch.mean(y_pred_fake) + y) ** 2)
-                                        + torch.mean((y_pred_fake - torch.mean(y_pred_real) - y) ** 2)
+                                        torch.mean((y_pred_real_g - torch.mean(y_pred_fake_g) + y) ** 2)
+                                        + torch.mean((y_pred_fake_g - torch.mean(y_pred_real_g) - y) ** 2)
                                     )
                                     / 2
                                     * args.weight_gan
