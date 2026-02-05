@@ -181,29 +181,35 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                             gt_ab  # AB from ground truth
                         ), dim=1)  # [1, 3, H, W]
 
-                        # Train Discriminator (outside autocast to prevent AMP issues)
+                        # Single forward pass through discriminator to avoid SpectralNorm in-place issues
                         with autocast(enabled=False):
-                            # Convert to FP32 for discriminator
                             fake_data_lab_fp32 = fake_data_lab.float()
                             real_data_lab_fp32 = real_data_lab.float()
 
-                            discriminator_loss = discriminator_loss_fn(
-                                real_data_lab_fp32, fake_data_lab_fp32, discriminator
-                            )
+                            # Forward pass once
+                            y_pred_fake, _ = discriminator(fake_data_lab_fp32)
+                            y_pred_real, _ = discriminator(real_data_lab_fp32)
+
+                            y = torch.ones_like(y_pred_real)
+
+                            # Discriminator loss (use detached predictions)
+                            discriminator_loss = (
+                                torch.mean((y_pred_real.detach() - torch.mean(y_pred_fake.detach()) - y) ** 2)
+                                + torch.mean((y_pred_fake.detach() - torch.mean(y_pred_real.detach()) + y) ** 2)
+                            ) / 2
                             discriminator_loss.backward()
                             optimizer_d.step()
                             optimizer_d.zero_grad()
 
-                        # Train Generator (add GAN loss to fusion network)
-                        # Only add after epoch_train_discriminator (following SwinSingle strategy)
-                        if epoch > args.epoch_train_discriminator:
-                            with autocast(enabled=False):
-                                fake_data_lab_fp32 = fake_data_lab.float()
-                                real_data_lab_fp32 = real_data_lab.float()
-
-                                generator_loss = generator_loss_fn(
-                                    real_data_lab_fp32, fake_data_lab_fp32,
-                                    discriminator, args.weight_gan, args.device
+                            # Generator loss (use original predictions, only after epoch_train_discriminator)
+                            if epoch > args.epoch_train_discriminator:
+                                generator_loss = (
+                                    (
+                                        torch.mean((y_pred_real - torch.mean(y_pred_fake) + y) ** 2)
+                                        + torch.mean((y_pred_fake - torch.mean(y_pred_real) - y) ** 2)
+                                    )
+                                    / 2
+                                    * args.weight_gan
                                 )
                                 loss = loss + generator_loss  # Add to total generator loss
 
