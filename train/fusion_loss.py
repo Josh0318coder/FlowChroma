@@ -631,16 +631,18 @@ def generator_loss_fn(real_data_lab, fake_data_lab, discriminator, weight_gan, d
         generator_loss: scalar
     """
     if weight_gan > 0:
-        # For generator loss, we need gradients for fake (to train generator)
-        # but NOT for real (it's just ground truth reference)
-        y_pred_fake, _ = discriminator(fake_data_lab)
+        # CRITICAL: Order matters for SpectralNorm!
+        # First do no_grad forward (real), then do forward that needs gradients (fake)
+        # This ensures the weight version is correct when backward() is called
 
         # Use no_grad for real to prevent SpectralNorm from affecting gradient graph
         with torch.no_grad():
             y_pred_real, _ = discriminator(real_data_lab)
-
-        # Detach y_pred_real since we computed it in no_grad
         y_pred_real = y_pred_real.detach()
+
+        # For generator loss, we need gradients for fake (to train generator)
+        # This must be LAST so backward() sees the correct weight version
+        y_pred_fake, _ = discriminator(fake_data_lab)
 
         y = torch.ones_like(y_pred_real)
         generator_loss = (
