@@ -169,10 +169,11 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
 
                     if i == 0 and discriminator is not None and args.weight_gan > 0:
                         # Prepare LAB images for discriminator (need to uncenter L channel)
+                        # Clone to avoid in-place operation conflicts with main loss backward
                         from src.utils import uncenter_l
                         fake_data_lab = torch.cat((
-                            uncenter_l(output_lab[0:1, :, :].unsqueeze(0)),  # Uncenter L: [-1,1] -> [0,1]
-                            output_ab  # AB is already [-1,1]
+                            uncenter_l(output_lab[0:1, :, :].unsqueeze(0).clone()),  # Clone to avoid conflicts
+                            output_ab.clone()  # Clone to avoid conflicts
                         ), dim=1)  # [1, 3, H, W]
 
                         real_data_lab = torch.cat((
