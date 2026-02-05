@@ -127,13 +127,13 @@ class Discriminator(nn.Module):
 
         self.layer1 = nn.Sequential(
             SpectralNorm(nn.Conv2d(self.in_channels, self.ndf, 4, 2, 1)),
-            nn.LeakyReLU(0.2, inplace=True)
+            nn.LeakyReLU(0.2, inplace=False)
         )
 
         self.layer2 = nn.Sequential(
             SpectralNorm(nn.Conv2d(self.ndf, self.ndf, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.attention = SelfAttention(self.ndf)
@@ -141,25 +141,25 @@ class Discriminator(nn.Module):
         self.layer3 = nn.Sequential(
             SpectralNorm(nn.Conv2d(self.ndf, self.ndf * 2, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.layer4 = nn.Sequential(
             SpectralNorm(nn.Conv2d(self.ndf * 2, self.ndf * 4, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 4),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.layer5 = nn.Sequential(
             SpectralNorm(nn.Conv2d(self.ndf * 4, self.ndf * 8, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 8),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.layer6 = nn.Sequential(
             SpectralNorm(nn.Conv2d(self.ndf * 8, self.ndf * 16, 4, 2, 1)),
             nn.InstanceNorm2d(self.ndf * 16),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2, inplace=False),
         )
 
         self.last = SpectralNorm(nn.Conv2d(self.ndf * 16, 1, [3, 3], 1, 0))
