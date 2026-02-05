@@ -362,9 +362,9 @@ def main():
                         help='Use adaptive temporal loss (no optical flow required)')
 
     # GAN Loss (from SwinSingle)
-    parser.add_argument('--weight_gan', type=float, default=0.0,
+    parser.add_argument('--weight_gan', type=float, default=0.5,
                         help='Weight for GAN loss (default: 0.0, set >0 to enable)')
-    parser.add_argument('--epoch_train_discriminator', type=int, default=3,
+    parser.add_argument('--epoch_train_discriminator', type=int, default=0,
                         help='Start generator GAN loss after N epochs (default: 3)')
     parser.add_argument('--lr_discriminator', type=float, default=1e-4,
                         help='Learning rate for discriminator (default: 1e-4)')
