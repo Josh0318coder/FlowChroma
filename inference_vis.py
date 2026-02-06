@@ -38,6 +38,83 @@ from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import FusionNetV1
 
 
+def compute_heatmap_stats(all_values):
+    """
+    Compute statistics for heatmap values
+
+    Args:
+        all_values: numpy array of all values
+
+    Returns:
+        dict with statistics
+    """
+    if len(all_values) == 0:
+        return None
+
+    stats = {
+        'total_pixels': len(all_values),
+        # Basic statistics
+        'mean': float(np.mean(all_values)),
+        'std': float(np.std(all_values)),
+        'min': float(np.min(all_values)),
+        'max': float(np.max(all_values)),
+        'median': float(np.median(all_values)),
+        # Percentiles
+        'p5': float(np.percentile(all_values, 5)),
+        'p10': float(np.percentile(all_values, 10)),
+        'p25': float(np.percentile(all_values, 25)),
+        'p75': float(np.percentile(all_values, 75)),
+        'p90': float(np.percentile(all_values, 90)),
+        'p95': float(np.percentile(all_values, 95)),
+        # Interval ratios
+        'ratio_0.0_0.2': float(np.mean((all_values >= 0.0) & (all_values < 0.2))),
+        'ratio_0.2_0.4': float(np.mean((all_values >= 0.2) & (all_values < 0.4))),
+        'ratio_0.4_0.6': float(np.mean((all_values >= 0.4) & (all_values < 0.6))),
+        'ratio_0.6_0.8': float(np.mean((all_values >= 0.6) & (all_values < 0.8))),
+        'ratio_0.8_1.0': float(np.mean((all_values >= 0.8) & (all_values <= 1.0))),
+    }
+    return stats
+
+
+def write_stats_to_file(stats, output_path, title, num_frames=None):
+    """
+    Write statistics to a text file
+
+    Args:
+        stats: dict with statistics
+        output_path: path to output txt file
+        title: title for the statistics (e.g., "MemFlow Confidence" or "SwinTExCo Similarity")
+        num_frames: number of frames processed
+    """
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write("=" * 60 + "\n")
+        f.write(f" {title} Distribution Statistics\n")
+        f.write("=" * 60 + "\n\n")
+
+        if num_frames:
+            f.write(f"Frames: {num_frames}\n")
+        f.write(f"Total pixels: {stats['total_pixels']:,}\n\n")
+
+        f.write("Basic Statistics:\n")
+        f.write(f"  Mean:   {stats['mean']:.4f}\n")
+        f.write(f"  Std:    {stats['std']:.4f}\n")
+        f.write(f"  Min:    {stats['min']:.4f}\n")
+        f.write(f"  Max:    {stats['max']:.4f}\n")
+        f.write(f"  Median: {stats['median']:.4f}\n\n")
+
+        f.write("Percentiles:\n")
+        f.write(f"  P5:  {stats['p5']:.4f}  |  P95: {stats['p95']:.4f}\n")
+        f.write(f"  P10: {stats['p10']:.4f}  |  P90: {stats['p90']:.4f}\n")
+        f.write(f"  P25: {stats['p25']:.4f}  |  P75: {stats['p75']:.4f}\n\n")
+
+        f.write("Interval Ratios:\n")
+        f.write(f"  [0.0, 0.2): {stats['ratio_0.0_0.2']*100:5.1f}%\n")
+        f.write(f"  [0.2, 0.4): {stats['ratio_0.2_0.4']*100:5.1f}%\n")
+        f.write(f"  [0.4, 0.6): {stats['ratio_0.4_0.6']*100:5.1f}%\n")
+        f.write(f"  [0.6, 0.8): {stats['ratio_0.6_0.8']*100:5.1f}%\n")
+        f.write(f"  [0.8, 1.0]: {stats['ratio_0.8_1.0']*100:5.1f}%\n")
+
+
 def visualize_heatmap(tensor, colormap='turbo'):
     """
     Convert confidence/similarity map to colored heatmap
@@ -242,6 +319,10 @@ def process_scene(system, scene_path, output_scene_path, target_size=(224, 224),
     else:
         debug_dirs = None
 
+    # Initialize value collectors for statistics
+    confidence_values = [] if (save_components and 'confidence' in save_components) else None
+    similarity_values = [] if (save_components and 'similarity' in save_components) else None
+
     # Pre-compute reference features ONCE (SwinTExCo optimization)
     print(f"  🎨 Pre-computing reference features...")
     cached_ref_features = None
@@ -321,20 +402,26 @@ def process_scene(system, scene_path, output_scene_path, target_size=(224, 224),
                     swintexco_rgb.save(os.path.join(debug_dirs['swintexco'], frame_name))
 
                 if 'confidence' in save_components:
+                    conf_data = results['memflow_conf'].cpu().numpy()
                     conf_heatmap = visualize_heatmap(results['memflow_conf'], colormap=colormap)
                     conf_heatmap.save(os.path.join(debug_dirs['confidence'], frame_name))
                     if save_npy:
                         conf_npy_path = os.path.join(debug_dirs['confidence_npy'],
                                                      os.path.splitext(frame_name)[0] + '.npy')
-                        np.save(conf_npy_path, results['memflow_conf'].cpu().numpy())
+                        np.save(conf_npy_path, conf_data)
+                    # Collect values for statistics
+                    confidence_values.extend(conf_data.flatten())
 
                 if 'similarity' in save_components:
+                    sim_data = results['swintexco_sim'].cpu().numpy()
                     sim_heatmap = visualize_heatmap(results['swintexco_sim'], colormap=colormap)
                     sim_heatmap.save(os.path.join(debug_dirs['similarity'], frame_name))
                     if save_npy:
                         sim_npy_path = os.path.join(debug_dirs['similarity_npy'],
                                                     os.path.splitext(frame_name)[0] + '.npy')
-                        np.save(sim_npy_path, results['swintexco_sim'].cpu().numpy())
+                        np.save(sim_npy_path, sim_data)
+                    # Collect values for statistics
+                    similarity_values.extend(sim_data.flatten())
             else:
                 # Normal mode: only final result
                 output_lab = results
@@ -354,6 +441,34 @@ def process_scene(system, scene_path, output_scene_path, target_size=(224, 224),
         colorized_frame.save(output_path)
 
     print(f"  ✅ Saved {len(colorized_frames)} frames to {output_scene_path}")
+
+    # Compute and save statistics if debug output is enabled
+    scene_stats = {}
+    if debug_output_path and save_components:
+        scene_name = os.path.basename(scene_path)
+        stats_dir = os.path.join(debug_output_path, scene_name)
+
+        if confidence_values and len(confidence_values) > 0:
+            conf_array = np.array(confidence_values)
+            conf_stats = compute_heatmap_stats(conf_array)
+            if conf_stats:
+                stats_path = os.path.join(stats_dir, 'confidence_stats.txt')
+                write_stats_to_file(conf_stats, stats_path, 'MemFlow Confidence', num_frames=len(frame_files))
+                scene_stats['confidence'] = conf_stats
+                scene_stats['confidence_values'] = conf_array
+                print(f"  📊 Saved confidence statistics to {stats_path}")
+
+        if similarity_values and len(similarity_values) > 0:
+            sim_array = np.array(similarity_values)
+            sim_stats = compute_heatmap_stats(sim_array)
+            if sim_stats:
+                stats_path = os.path.join(stats_dir, 'similarity_stats.txt')
+                write_stats_to_file(sim_stats, stats_path, 'SwinTExCo Similarity', num_frames=len(frame_files))
+                scene_stats['similarity'] = sim_stats
+                scene_stats['similarity_values'] = sim_array
+                print(f"  📊 Saved similarity statistics to {stats_path}")
+
+    return scene_stats
 
 
 def process_datasets(system, input_dirs, output_dir, target_size=(224, 224),
@@ -397,6 +512,10 @@ def process_datasets(system, input_dirs, output_dir, target_size=(224, 224),
 
     print(f"\n📊 Total: {len(all_scenes)} scenes to process\n")
 
+    # Collect global statistics
+    global_confidence_values = []
+    global_similarity_values = []
+
     # Process each scene
     for scene_idx, (scene_name, scene_path) in enumerate(all_scenes, 1):
         print(f"🎬 [{scene_idx}/{len(all_scenes)}] Processing: {scene_name}")
@@ -404,7 +523,7 @@ def process_datasets(system, input_dirs, output_dir, target_size=(224, 224),
         output_scene_path = os.path.join(output_dir, scene_name)
 
         try:
-            process_scene(
+            scene_stats = process_scene(
                 system,
                 scene_path,
                 output_scene_path,
@@ -414,6 +533,14 @@ def process_datasets(system, input_dirs, output_dir, target_size=(224, 224),
                 colormap=colormap,
                 save_npy=save_npy
             )
+
+            # Collect values for global statistics
+            if scene_stats:
+                if 'confidence_values' in scene_stats:
+                    global_confidence_values.extend(scene_stats['confidence_values'].flatten())
+                if 'similarity_values' in scene_stats:
+                    global_similarity_values.extend(scene_stats['similarity_values'].flatten())
+
         except Exception as e:
             print(f"  ❌ Error processing {scene_name}: {e}")
             import traceback
@@ -421,6 +548,36 @@ def process_datasets(system, input_dirs, output_dir, target_size=(224, 224),
             continue
 
         print()  # Empty line between scenes
+
+    # Save global statistics if multiple scenes processed
+    if debug_output and len(all_scenes) > 1:
+        print("\n" + "="*80)
+        print("📊 Computing global statistics across all scenes...")
+        print("="*80)
+
+        if len(global_confidence_values) > 0:
+            conf_array = np.array(global_confidence_values)
+            conf_stats = compute_heatmap_stats(conf_array)
+            if conf_stats:
+                stats_path = os.path.join(debug_output, 'global_confidence_stats.txt')
+                write_stats_to_file(conf_stats, stats_path,
+                                   f'MemFlow Confidence (Global - {len(all_scenes)} scenes)',
+                                   num_frames=None)
+                print(f"  Mean: {conf_stats['mean']:.4f}, Std: {conf_stats['std']:.4f}")
+                print(f"  P5-P95: [{conf_stats['p5']:.4f}, {conf_stats['p95']:.4f}]")
+                print(f"  📊 Saved to {stats_path}")
+
+        if len(global_similarity_values) > 0:
+            sim_array = np.array(global_similarity_values)
+            sim_stats = compute_heatmap_stats(sim_array)
+            if sim_stats:
+                stats_path = os.path.join(debug_output, 'global_similarity_stats.txt')
+                write_stats_to_file(sim_stats, stats_path,
+                                   f'SwinTExCo Similarity (Global - {len(all_scenes)} scenes)',
+                                   num_frames=None)
+                print(f"  Mean: {sim_stats['mean']:.4f}, Std: {sim_stats['std']:.4f}")
+                print(f"  P5-P95: [{sim_stats['p5']:.4f}, {sim_stats['p95']:.4f}]")
+                print(f"  📊 Saved to {stats_path}")
 
     print("="*80)
     print(f"✅ All datasets processed!")
