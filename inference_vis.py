@@ -66,13 +66,18 @@ def compute_heatmap_stats(all_values):
         'p75': float(np.percentile(all_values, 75)),
         'p90': float(np.percentile(all_values, 90)),
         'p95': float(np.percentile(all_values, 95)),
-        # Interval ratios
-        'ratio_0.0_0.2': float(np.mean((all_values >= 0.0) & (all_values < 0.2))),
-        'ratio_0.2_0.4': float(np.mean((all_values >= 0.2) & (all_values < 0.4))),
-        'ratio_0.4_0.6': float(np.mean((all_values >= 0.4) & (all_values < 0.6))),
-        'ratio_0.6_0.8': float(np.mean((all_values >= 0.6) & (all_values < 0.8))),
-        'ratio_0.8_1.0': float(np.mean((all_values >= 0.8) & (all_values <= 1.0))),
     }
+
+    # Interval ratios with 0.05 step (20 intervals)
+    for i in range(20):
+        low = i * 0.05
+        high = (i + 1) * 0.05
+        if i == 19:  # Last interval includes 1.0
+            ratio = float(np.mean((all_values >= low) & (all_values <= high)))
+        else:
+            ratio = float(np.mean((all_values >= low) & (all_values < high)))
+        stats[f'ratio_{low:.2f}_{high:.2f}'] = ratio
+
     return stats
 
 
@@ -107,12 +112,13 @@ def write_stats_to_file(stats, output_path, title, num_frames=None):
         f.write(f"  P10: {stats['p10']:.4f}  |  P90: {stats['p90']:.4f}\n")
         f.write(f"  P25: {stats['p25']:.4f}  |  P75: {stats['p75']:.4f}\n\n")
 
-        f.write("Interval Ratios:\n")
-        f.write(f"  [0.0, 0.2): {stats['ratio_0.0_0.2']*100:5.1f}%\n")
-        f.write(f"  [0.2, 0.4): {stats['ratio_0.2_0.4']*100:5.1f}%\n")
-        f.write(f"  [0.4, 0.6): {stats['ratio_0.4_0.6']*100:5.1f}%\n")
-        f.write(f"  [0.6, 0.8): {stats['ratio_0.6_0.8']*100:5.1f}%\n")
-        f.write(f"  [0.8, 1.0]: {stats['ratio_0.8_1.0']*100:5.1f}%\n")
+        f.write("Interval Ratios (0.05 step):\n")
+        for i in range(20):
+            low = i * 0.05
+            high = (i + 1) * 0.05
+            key = f'ratio_{low:.2f}_{high:.2f}'
+            bracket = ']' if i == 19 else ')'
+            f.write(f"  [{low:.2f}, {high:.2f}{bracket}: {stats[key]*100:5.2f}%\n")
 
 
 def visualize_heatmap(tensor, colormap='turbo'):
