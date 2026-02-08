@@ -188,10 +188,10 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                             discriminator_loss = discriminator_loss_fn(
                                 real_data_lab_fp32, fake_data_lab_fp32, discriminator
                             )
-                            # Scale for gradient accumulation (same as generator)
-                            scaled_discriminator_loss = discriminator_loss / args.accumulation_steps
-                            scaled_discriminator_loss.backward()
-                            # NOTE: optimizer_d.step() is done later in gradient accumulation block
+                            # Discriminator backward and step immediately (following SwinTExCo)
+                            discriminator_loss.backward()
+                            optimizer_d.step()
+                            optimizer_d.zero_grad()  # Clear D gradients before G's backward
 
                             # Generator training (only after epoch_train_discriminator)
                             if epoch > args.epoch_train_discriminator:
@@ -250,11 +250,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-
-            # Discriminator optimizer step (synchronized with generator)
-            if optimizer_d is not None:
-                optimizer_d.step()
-                optimizer_d.zero_grad()
+            # Note: Discriminator is updated immediately after its backward (see above)
 
         # Accumulate losses (use frame 0's loss_dict for contextual loss and GAN losses)
         epoch_losses['total'] += batch_loss.item()
