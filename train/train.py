@@ -201,8 +201,9 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                                     discriminator, args.weight_gan, args.device
                                 )
                                 # Backward immediately to avoid SpectralNorm version mismatch
+                                # retain_graph=True because other losses also depend on output_ab
                                 scaled_generator_loss = generator_loss / args.accumulation_steps
-                                scaled_generator_loss.backward()
+                                scaled_generator_loss.backward(retain_graph=True)
 
                     # Always add GAN losses to frame 0's loss_dict (even if 0)
                     if i == 0:
