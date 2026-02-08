@@ -200,7 +200,10 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                                     real_data_lab_fp32, fake_data_lab_fp32,
                                     discriminator, args.weight_gan, args.device
                                 )
-                                loss = loss + generator_loss  # Add to total generator loss
+                                # IMPORTANT: backward immediately to avoid SpectralNorm version mismatch
+                                scaled_generator_loss = generator_loss / args.accumulation_steps
+                                scaled_generator_loss.backward()
+                                # Note: generator_loss is NOT added to loss, it's handled separately
 
                     # Always add GAN losses to frame 0's loss_dict (even if 0)
                     if i == 0:
