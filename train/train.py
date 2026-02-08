@@ -188,10 +188,10 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                             discriminator_loss = discriminator_loss_fn(
                                 real_data_lab_fp32, fake_data_lab_fp32, discriminator
                             )
-                            # Scale for gradient accumulation (same as generator)
-                            scaled_discriminator_loss = discriminator_loss / args.accumulation_steps
-                            scaled_discriminator_loss.backward()
-                            # NOTE: optimizer_d.step() is done later in gradient accumulation block
+                            # Discriminator backward and step immediately (following SwinTExCo)
+                            discriminator_loss.backward()
+                            optimizer_d.step()
+                            optimizer_d.zero_grad()
 
                             # Generator training (only after epoch_train_discriminator)
                             if epoch > args.epoch_train_discriminator:
@@ -200,7 +200,9 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                                     real_data_lab_fp32, fake_data_lab_fp32,
                                     discriminator, args.weight_gan, args.device
                                 )
-                                loss = loss + generator_loss  # Add to total generator loss
+                                # Backward immediately to avoid SpectralNorm version mismatch
+                                scaled_generator_loss = generator_loss / args.accumulation_steps
+                                scaled_generator_loss.backward()
 
                     # Always add GAN losses to frame 0's loss_dict (even if 0)
                     if i == 0:
@@ -250,11 +252,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-
-            # Discriminator optimizer step (synchronized with generator)
-            if optimizer_d is not None:
-                optimizer_d.step()
-                optimizer_d.zero_grad()
+            # Note: Discriminator is updated immediately after its backward (see GAN training section)
 
         # Accumulate losses (use frame 0's loss_dict for contextual loss and GAN losses)
         epoch_losses['total'] += batch_loss.item()
@@ -401,9 +399,9 @@ def main():
 
     # Loss
     criterion = FusionLoss(
-        lambda_l1=0.0,
-        lambda_perceptual=0.0,
-        lambda_contextual=0.015,  # 🔥 CRITICAL FIX: Reduced from 0.1 to 0.015 (SwinTExCo paper value)
+        lambda_l1=1.0,
+        lambda_perceptual=0.15,
+        lambda_contextual=0.0,
         lambda_temporal=args.lambda_temporal,
         lambda_align=args.lambda_align,
         lambda_smooth=args.lambda_smooth,
