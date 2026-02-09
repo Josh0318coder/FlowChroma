@@ -204,6 +204,8 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                                 # retain_graph=True because other losses also depend on output_ab
                                 scaled_generator_loss = generator_loss / args.accumulation_steps
                                 scaled_generator_loss.backward(retain_graph=True)
+                                # CRITICAL: Clear D gradients so they don't pollute next D training
+                                optimizer_d.zero_grad()
 
                     # Always add GAN losses to frame 0's loss_dict (even if 0)
                     if i == 0:
