@@ -1,0 +1,907 @@
+"""
+FlowChroma Inference Script for Dataset Batch Processing
+
+Colorize grayscale video sequences using the complete FlowChroma architecture:
+- MemFlow: Temporal flow-based colorization (frozen)
+- SwinTExCo: Reference-based single-frame colorization (fine-tuned)
+- FusionNet: Multi-scale fusion network
+
+Usage:
+    python inference.py \
+        --memflow_path MemFlow \
+        --swintexco_path SwinSingle \
+        --memflow_ckpt MemFlow/ckpt/memflow_colorization.pth \
+        --swintexco_ckpt SwinSingle/ckpt/epoch_1 \
+        --fusion_ckpt checkpoints/fusion_best.pth \
+        --input_dirs /path/to/dataset1,/path/to/dataset2 \
+        --output_dir /path/to/output \
+        --target_size 224 224
+"""
+
+import argparse
+import os
+import sys
+import torch
+import numpy as np
+from PIL import Image
+from pathlib import Path
+import cv2
+from tqdm import tqdm
+import glob
+import time
+from torch.profiler import profile, ProfilerActivity, record_function
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
+import matplotlib.pyplot as plt
+
+sys.path.insert(0, '.')
+
+from train.fusion_system import FusionSystem
+from FusionNet.fusion_unet import FusionNetV1
+
+
+def compute_heatmap_stats(all_values):
+    """
+    Compute statistics for heatmap values
+
+    Args:
+        all_values: numpy array of all values
+
+    Returns:
+        dict with statistics
+    """
+    if len(all_values) == 0:
+        return None
+
+    stats = {
+        'total_pixels': len(all_values),
+        # Basic statistics
+        'mean': float(np.mean(all_values)),
+        'std': float(np.std(all_values)),
+        'min': float(np.min(all_values)),
+        'max': float(np.max(all_values)),
+        'median': float(np.median(all_values)),
+        # Percentiles
+        'p5': float(np.percentile(all_values, 5)),
+        'p10': float(np.percentile(all_values, 10)),
+        'p25': float(np.percentile(all_values, 25)),
+        'p75': float(np.percentile(all_values, 75)),
+        'p90': float(np.percentile(all_values, 90)),
+        'p95': float(np.percentile(all_values, 95)),
+    }
+
+    # Interval ratios with 0.05 step (20 intervals)
+    for i in range(20):
+        low = i * 0.05
+        high = (i + 1) * 0.05
+        if i == 19:  # Last interval includes 1.0
+            ratio = float(np.mean((all_values >= low) & (all_values <= high)))
+        else:
+            ratio = float(np.mean((all_values >= low) & (all_values < high)))
+        stats[f'ratio_{low:.2f}_{high:.2f}'] = ratio
+
+    return stats
+
+
+def write_stats_to_file(stats, output_path, title, num_frames=None):
+    """
+    Write statistics to a text file
+
+    Args:
+        stats: dict with statistics
+        output_path: path to output txt file
+        title: title for the statistics (e.g., "MemFlow Confidence" or "SwinTExCo Similarity")
+        num_frames: number of frames processed
+    """
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write("=" * 60 + "\n")
+        f.write(f" {title} Distribution Statistics\n")
+        f.write("=" * 60 + "\n\n")
+
+        if num_frames:
+            f.write(f"Frames: {num_frames}\n")
+        f.write(f"Total pixels: {stats['total_pixels']:,}\n\n")
+
+        f.write("Basic Statistics:\n")
+        f.write(f"  Mean:   {stats['mean']:.4f}\n")
+        f.write(f"  Std:    {stats['std']:.4f}\n")
+        f.write(f"  Min:    {stats['min']:.4f}\n")
+        f.write(f"  Max:    {stats['max']:.4f}\n")
+        f.write(f"  Median: {stats['median']:.4f}\n\n")
+
+        f.write("Percentiles:\n")
+        f.write(f"  P5:  {stats['p5']:.4f}  |  P95: {stats['p95']:.4f}\n")
+        f.write(f"  P10: {stats['p10']:.4f}  |  P90: {stats['p90']:.4f}\n")
+        f.write(f"  P25: {stats['p25']:.4f}  |  P75: {stats['p75']:.4f}\n\n")
+
+        f.write("Interval Ratios (0.05 step):\n")
+        for i in range(20):
+            low = i * 0.05
+            high = (i + 1) * 0.05
+            key = f'ratio_{low:.2f}_{high:.2f}'
+            bracket = ']' if i == 19 else ')'
+            f.write(f"  [{low:.2f}, {high:.2f}{bracket}: {stats[key]*100:5.2f}%\n")
+
+
+def visualize_heatmap(tensor, colormap='turbo'):
+    """
+    Convert confidence/similarity map to colored heatmap
+
+    Args:
+        tensor: [1, 1, H, W] or [1, H, W] tensor, range [0, 1]
+        colormap: 'turbo', 'viridis', 'jet', 'hot'
+
+    Returns:
+        PIL Image (RGB) - colored heatmap
+    """
+    # Extract data and move to CPU
+    if tensor.ndim == 4:
+        data = tensor.squeeze().cpu().numpy()  # [H, W]
+    elif tensor.ndim == 3:
+        data = tensor.squeeze(0).cpu().numpy()  # [H, W]
+    else:
+        data = tensor.cpu().numpy()
+
+    # Ensure range [0, 1]
+    data = np.clip(data, 0, 1)
+
+    # Apply colormap
+    cmap = plt.get_cmap(colormap)
+    colored = cmap(data)[:, :, :3]  # [H, W, 3] RGB (drop alpha)
+
+    # Convert to uint8
+    rgb_uint8 = (colored * 255).astype(np.uint8)
+
+    return Image.fromarray(rgb_uint8)
+
+
+def profile_inference(system, target_size, device, num_frames=5):
+    """
+    用 torch.profiler 對完整 forward pass 計時，找出各模組的實際 GPU 耗時。
+    會跑 num_frames 幀（含 warmup），輸出每個模組的 CUDA 時間佔比。
+    """
+    print("\n" + "=" * 60)
+    print(f"  Profiling ({num_frames} frames, device={device})")
+    print("=" * 60)
+
+    H, W = target_size
+    dummy_ref_pil = Image.fromarray(
+        np.random.randint(0, 255, (H, W, 3), dtype=np.uint8)
+    )
+
+    # 建立假資料
+    def make_lab(h, w):
+        t = torch.randn(1, 3, h, w, device=device) * 0.1
+        return t
+
+    frame_t = make_lab(H, W)
+    frame_t1 = make_lab(H, W)
+
+    system.eval()
+    system.reset_memory()
+
+    # 先跑一次 warmup（不計時）
+    with torch.no_grad():
+        system.forward_single_frame(
+            None, frame_t1, dummy_ref_pil, dummy_ref_pil,
+            is_first=True,
+        )
+    torch.cuda.synchronize()
+
+    # ── 用 torch.profiler 追蹤實際耗時 ──
+    with profile(
+        activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+        record_shapes=False,
+        with_stack=False,
+        with_flops=False,
+    ) as prof:
+        with torch.no_grad():
+            for i in range(num_frames):
+                system.reset_memory()
+                with record_function("frame_0_first"):
+                    system.forward_single_frame(
+                        None, frame_t1, dummy_ref_pil, dummy_ref_pil,
+                        is_first=True,
+                    )
+                for _ in range(2):
+                    with record_function("frame_N_subsequent"):
+                        system.forward_single_frame(
+                            frame_t, frame_t1, dummy_ref_pil, dummy_ref_pil,
+                            is_first=False,
+                        )
+
+    torch.cuda.synchronize()
+
+    print("\n[Top 20 CUDA ops by time]")
+    print(prof.key_averages().table(
+        sort_by="cuda_time_total",
+        row_limit=20,
+    ))
+
+    # ── 簡易各模組牆鐘時間（cuda event 計時）──
+    print("\n[Per-component wall-clock timing (CUDA events, avg over frames)]")
+    timings = {}
+
+    def cuda_time(fn):
+        start = torch.cuda.Event(enable_timing=True)
+        end   = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end)
+
+    REPEAT = num_frames
+    system.reset_memory()
+
+    # 先跑第一幀建立 memory state
+    with torch.no_grad():
+        system.forward_single_frame(
+            None, frame_t1, dummy_ref_pil, dummy_ref_pil, is_first=True,
+        )
+
+    # embed_net（SwinV2 feature extraction）
+    from src.utils import tensor_lab2rgb, uncenter_l, uncenter_ab
+    ref_lab = system.swintexco.processor(dummy_ref_pil).unsqueeze(0).to(device)
+    ref_l  = ref_lab[:, 0:1]
+    ref_ab = ref_lab[:, 1:3]
+    ref_rgb = tensor_lab2rgb(torch.cat([uncenter_l(ref_l), uncenter_ab(ref_ab)], dim=1))
+
+    t_embed = sum(
+        cuda_time(lambda: system.swintexco.embed_net(ref_rgb))
+        for _ in range(REPEAT)
+    ) / REPEAT
+
+    # embed_net A-side + WarpNet (nonlocal_net)
+    # Now embed_net for target frame is computed here (not inside warp_color)
+    # and its raw_stage1 is shared with MemFlow fnet → measure them together
+    with torch.no_grad():
+        features_B = system.swintexco.embed_net(ref_rgb)
+    from src.models.CNN.FrameColor import warp_color
+    from src.utils import feature_normalize as _fn, gray2rgb_batch
+    _B0, _B1, _B2, _B3 = features_B
+    _cached_B_warp = system.swintexco.nonlocal_net.precompute_B_features(
+        ref_lab, _fn(_B0), _fn(_B1), _fn(_B2), _fn(_B3)
+    )
+    target_gray = gray2rgb_batch(frame_t1[:, 0:1])
+
+    def _warp_with_embed():
+        with torch.no_grad():
+            feats_A, raw_s1 = system.swintexco.embed_net(target_gray, return_raw_stage1=True)
+        return warp_color(
+            frame_t1[:, 0:1], ref_lab, features_B,
+            system.swintexco.embed_net, system.swintexco.nonlocal_net,
+            temperature=1e-10, #1e-10
+            cached_B_features=_cached_B_warp,
+            features_A=feats_A,
+        ), raw_s1
+
+    system.swintexco.nonlocal_net._profile_internals = True
+    t_warp = sum(cuda_time(_warp_with_embed) for _ in range(REPEAT)) / REPEAT
+    system.swintexco.nonlocal_net._profile_internals = False
+
+    # Pre-compute raw_stage1 once (outside timing) for MemFlow benchmark
+    with torch.no_grad():
+        _, _raw_s1_t1 = system.swintexco.embed_net(target_gray, return_raw_stage1=True)
+    _raw_s1_t = _raw_s1_t1  # simulate frame_t = previous frame's t1
+
+    def _memflow_with_cache():
+        with torch.no_grad():
+            fmap_t  = system.memflow.channel_convertor(_raw_s1_t.float())
+            fmap_t1 = system.memflow.channel_convertor(_raw_s1_t1.float())
+        precomp = torch.stack([fmap_t, fmap_t1], dim=1)
+        return system.memflow_inference(frame_t, frame_t1, precomputed_fmaps=precomp)
+
+    # MemFlow
+    frame_t  = make_lab(H, W)
+    frame_t1 = make_lab(H, W)
+    system.reset_memory()
+    with torch.no_grad():
+        system.memflow_inference(frame_t, frame_t1)
+    t_memflow = sum(cuda_time(_memflow_with_cache) for _ in range(REPEAT)) / REPEAT
+
+    # FusionNet
+    dummy_memflow_lab = torch.randn(1, 3, H, W, device=device)
+    dummy_memflow_conf = torch.zeros(1, 1, H, W, device=device)
+    dummy_swintexco_lab = torch.randn(1, 3, H, W, device=device)
+    dummy_swintexco_sim = torch.zeros(1, 1, H, W, device=device)
+    t_fusion = sum(
+        cuda_time(lambda: system.fusion_unet(
+            dummy_memflow_lab, dummy_memflow_conf,
+            dummy_swintexco_lab, dummy_swintexco_sim
+        ))
+        for _ in range(REPEAT)
+    ) / REPEAT
+
+    total = t_embed + t_warp + t_memflow + t_fusion
+    print(f"\n  {'模組':<30} {'ms':>8}  {'佔比':>7}")
+    print(f"  {'-'*48}")
+    for name, t in [
+        ("embed_net (SwinV2)",  t_embed),
+        ("WarpNet (NonlocalNet)", t_warp),
+        ("MemFlow",             t_memflow),
+        ("FusionNet",           t_fusion),
+    ]:
+        print(f"  {name:<30} {t:>8.2f}ms  {t/total*100:>6.1f}%")
+    print(f"  {'-'*48}")
+    print(f"  {'Total (4 components)':<30} {total:>8.2f}ms  100.0%")
+    print("=" * 60 + "\n")
+
+
+def load_checkpoint(system, checkpoint_path, device):
+    """Load trained FusionNet checkpoint"""
+    if not os.path.exists(checkpoint_path):
+        print(f"⚠️  Checkpoint not found: {checkpoint_path}")
+        print("   Using pre-trained MemFlow & SwinTExCo, untrained FusionNet")
+        return
+
+    print(f"Loading checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Load FusionNet weights
+    if 'fusion_unet' in checkpoint:
+        system.fusion_unet.load_state_dict(checkpoint['fusion_unet'])
+        print("✅ FusionNet weights loaded")
+
+    # Load fine-tuned SwinTExCo weights (if available)
+    if 'swintexco_embed' in checkpoint:
+        system.swintexco.embed_net.load_state_dict(checkpoint['swintexco_embed'])
+        system.swintexco.nonlocal_net.load_state_dict(checkpoint['swintexco_nonlocal'])
+        system.swintexco.colornet.load_state_dict(checkpoint['swintexco_colornet'])
+        print("✅ Fine-tuned SwinTExCo weights loaded")
+
+    epoch = checkpoint.get('epoch', 'unknown')
+    best_loss = checkpoint.get('best_loss', 'unknown')
+    print(f"   Epoch: {epoch}, Best Loss: {best_loss}")
+
+
+def rgb_to_lab_tensor(pil_image, target_size=(224, 224)):
+    """
+    Convert PIL RGB image to LAB tensor [3, H, W]
+
+    Args:
+        pil_image: PIL Image (RGB)
+        target_size: (H, W) tuple
+
+    Returns:
+        lab_tensor: [3, H, W] normalized to [-1, 1]
+    """
+    # Resize
+    img_resized = pil_image.resize(target_size[::-1], Image.LANCZOS)  # PIL uses (W, H)
+
+    # Convert to numpy array
+    img_np = np.array(img_resized, dtype=np.uint8)
+
+    # RGB to LAB
+    lab_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    # Normalize
+    lab_np[:, :, 0] = lab_np[:, :, 0] * 100.0 / 255.0  # L: [0, 100]
+    lab_np[:, :, 1] = lab_np[:, :, 1] - 128.0          # a: [-128, 127]
+    lab_np[:, :, 2] = lab_np[:, :, 2] - 128.0          # b: [-128, 127]
+
+    # Further normalize to [-1, 1]
+    lab_np[:, :, 0] = (lab_np[:, :, 0] / 50.0) - 1.0   # L: [-1, 1]
+    lab_np[:, :, 1] = lab_np[:, :, 1] / 127.0          # a: [-1, 1]
+    lab_np[:, :, 2] = lab_np[:, :, 2] / 127.0          # b: [-1, 1]
+
+    # To tensor [3, H, W]
+    lab_tensor = torch.from_numpy(lab_np).permute(2, 0, 1).float()
+
+    return lab_tensor
+
+
+def lab_tensor_to_rgb(lab_tensor):
+    """
+    Convert LAB tensor to RGB PIL Image
+
+    Args:
+        lab_tensor: [3, H, W] tensor
+
+    Returns:
+        PIL Image (RGB)
+    """
+    # To numpy [H, W, 3]
+    lab_np = lab_tensor.detach().cpu().numpy().transpose(1, 2, 0)
+
+    # Denormalize
+    lab_np[:, :, 0] = (lab_np[:, :, 0] + 1.0) * 50.0  # L: [-1, 1] -> [0, 100]
+    lab_np[:, :, 1] = lab_np[:, :, 1] * 127.0         # a: [-1, 1] -> [-127, 127]
+    lab_np[:, :, 2] = lab_np[:, :, 2] * 127.0         # b: [-1, 1] -> [-127, 127]
+
+    # Convert to OpenCV LAB format
+    lab_cv = lab_np.copy()
+    lab_cv[:, :, 0] = lab_np[:, :, 0] * 255.0 / 100.0  # L
+    lab_cv[:, :, 1] = lab_np[:, :, 1] + 128.0          # a
+    lab_cv[:, :, 2] = lab_np[:, :, 2] + 128.0          # b
+
+    lab_cv = np.clip(lab_cv, 0, 255).astype(np.uint8)
+
+    # LAB to RGB
+    bgr_np = cv2.cvtColor(lab_cv, cv2.COLOR_LAB2BGR)
+    rgb_np = cv2.cvtColor(bgr_np, cv2.COLOR_BGR2RGB)
+
+    return Image.fromarray(rgb_np)
+
+
+def process_scene(system, scene_path, output_scene_path, target_size=(224, 224),
+                  debug_output_path=None, save_components=None, colormap='turbo', save_npy=False):
+    """
+    Process a single scene directory
+
+    Args:
+        system: FusionSystem
+        scene_path: Path to scene directory containing frames
+        output_scene_path: Path to output directory for this scene
+        target_size: (H, W) tuple for resizing
+        debug_output_path: Optional path to save intermediate results
+        save_components: List of components to save ('memflow', 'swintexco', 'confidence', 'similarity')
+        colormap: Colormap for heatmaps ('turbo', 'viridis', 'jet', 'hot')
+        save_npy: Whether to save raw .npy files for confidence/similarity
+    """
+    # Get all image files
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
+    frame_files = []
+    for ext in image_extensions:
+        frame_files.extend(glob.glob(os.path.join(scene_path, ext)))
+        frame_files.extend(glob.glob(os.path.join(scene_path, ext.upper())))
+
+    frame_files = sorted(frame_files)
+
+    if len(frame_files) < 1:
+        print(f"  ⚠️  Skipping: no frames found")
+        return
+
+    print(f"  📹 Found {len(frame_files)} frames")
+
+    # Load all frames as PIL Images
+    print(f"  📥 Loading frames...")
+    frames_pil = []
+    frames_pil_orig = []  # Original size for final upscaling
+    for frame_path in tqdm(frame_files, desc="  Loading", leave=False):
+        img = Image.open(frame_path).convert('RGB')
+        frames_pil_orig.append(img)
+        img_resized = img.resize(target_size[::-1], Image.LANCZOS)  # PIL uses (W, H)
+        frames_pil.append(img_resized)
+
+    # First frame as reference
+    reference_pil = frames_pil[0]
+    print(f"  🎨 Using first frame as reference")
+
+    # Convert frames to LAB tensors
+    frames_lab = []
+    for frame_pil in frames_pil:
+        lab_tensor = rgb_to_lab_tensor(frame_pil, target_size)
+        frames_lab.append(lab_tensor)
+
+    # Extract original-size L channel tensors for final upscaling
+    large_L_tensors = []
+    for orig_pil in frames_pil_orig:
+        img_np = np.array(orig_pil, dtype=np.uint8)
+        lab_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        L_np = lab_np[:, :, 0] * 100.0 / 255.0  # L: [0, 100]
+        L_np = (L_np / 50.0) - 1.0              # L: [-1, 1]
+        large_L_tensors.append(torch.from_numpy(L_np).unsqueeze(0).float())  # [1, H, W]
+
+    # Reset memory for new video sequence
+    system.reset_memory()
+
+    # Create debug output directories if needed
+    if debug_output_path and save_components:
+        scene_name = os.path.basename(scene_path)
+        debug_dirs = {}
+        if 'memflow' in save_components:
+            debug_dirs['memflow'] = os.path.join(debug_output_path, scene_name, 'memflow')
+            os.makedirs(debug_dirs['memflow'], exist_ok=True)
+        if 'swintexco' in save_components:
+            debug_dirs['swintexco'] = os.path.join(debug_output_path, scene_name, 'swintexco')
+            os.makedirs(debug_dirs['swintexco'], exist_ok=True)
+        if 'confidence' in save_components:
+            debug_dirs['confidence'] = os.path.join(debug_output_path, scene_name, 'confidence')
+            os.makedirs(debug_dirs['confidence'], exist_ok=True)
+            if save_npy:
+                debug_dirs['confidence_npy'] = os.path.join(debug_output_path, scene_name, 'confidence_npy')
+                os.makedirs(debug_dirs['confidence_npy'], exist_ok=True)
+        if 'similarity' in save_components:
+            debug_dirs['similarity'] = os.path.join(debug_output_path, scene_name, 'similarity')
+            os.makedirs(debug_dirs['similarity'], exist_ok=True)
+            if save_npy:
+                debug_dirs['similarity_npy'] = os.path.join(debug_output_path, scene_name, 'similarity_npy')
+                os.makedirs(debug_dirs['similarity_npy'], exist_ok=True)
+    else:
+        debug_dirs = None
+
+    # Initialize value collectors for statistics
+    confidence_values = [] if (save_components and 'confidence' in save_components) else None
+    similarity_values = [] if (save_components and 'similarity' in save_components) else None
+
+    # Pre-compute reference features ONCE (SwinTExCo optimization)
+    print(f"  🎨 Pre-computing reference features...")
+    cached_ref_features = None
+    cached_B_warp_features = None
+    with torch.no_grad():
+        from torch.cuda.amp import autocast
+        from src.utils import tensor_lab2rgb, uncenter_l, uncenter_ab, feature_normalize
+
+        with autocast(enabled=False):
+            # Process reference image once
+            ref_lab = system.swintexco.processor(reference_pil).unsqueeze(0).to(system.device)
+            ref_l = ref_lab[:, 0:1, :, :]
+            ref_ab = ref_lab[:, 1:3, :, :]
+            ref_rgb = tensor_lab2rgb(torch.cat([uncenter_l(ref_l), uncenter_ab(ref_ab)], dim=1))
+
+            # Extract features once (cache for reuse)
+            features_B = system.swintexco.embed_net(ref_rgb)
+
+            # Cache embed_net output
+            cached_ref_features = (ref_lab, features_B)
+
+            # Pre-compute WarpNet B-side features (phi and B_lab are constant for fixed reference)
+            B_f0, B_f1, B_f2, B_f3 = features_B
+            cached_B_warp_features = system.swintexco.nonlocal_net.precompute_B_features(
+                ref_lab,
+                feature_normalize(B_f0),
+                feature_normalize(B_f1),
+                feature_normalize(B_f2),
+                feature_normalize(B_f3),
+            )
+
+    # Process frames sequentially
+    print(f"  🎬 Processing {len(frames_lab)} frames...")
+    colorized_frames = []
+    prev_lab_tensor = None  # Store previous frame's LAB tensor directly (avoids PIL roundtrip)
+
+    with torch.no_grad():
+        for i in tqdm(range(len(frames_lab)), desc="  Colorizing", leave=False):
+            # Add batch dimension [1, 3, H, W]
+            frame_t1_batch = frames_lab[i].unsqueeze(0).to(system.device)
+
+            if i == 0:
+                # First frame: no previous frame
+                results = system.forward_single_frame(
+                    None,
+                    frame_t1_batch,
+                    reference_pil,
+                    frames_pil[i],
+                    is_first=True,
+                    cached_ref_features=cached_ref_features,
+                    cached_B_warp_features=cached_B_warp_features,
+                    return_intermediates=(debug_dirs is not None)
+                )
+            else:
+                # Subsequent frames: use PREVIOUS PREDICTION (not GT)
+                # Use stored LAB tensor directly — avoids lossy PIL roundtrip
+                # (LAB → RGB PIL → LAB introduces 8-bit quantization error on L channel,
+                #  which slightly degrades the cross-step fmap cache validity)
+                frame_t_batch = prev_lab_tensor.unsqueeze(0).to(system.device)
+
+                results = system.forward_single_frame(
+                    frame_t_batch,
+                    frame_t1_batch,
+                    reference_pil,
+                    frames_pil[i],
+                    is_first=False,
+                    cached_ref_features=cached_ref_features,
+                    cached_B_warp_features=cached_B_warp_features,
+                    return_intermediates=(debug_dirs is not None)
+                )
+
+            # Extract output based on return type
+            if isinstance(results, dict):
+                # Debugging mode: save intermediate results
+                output_lab = results['fused']
+
+                # Get frame name (preserve original filename)
+                frame_name = os.path.basename(frame_files[i])
+
+                # Save intermediate results (frame-by-frame to avoid memory accumulation)
+                if 'memflow' in save_components:
+                    memflow_rgb = lab_tensor_to_rgb(results['memflow'].squeeze(0))
+                    memflow_rgb.save(os.path.join(debug_dirs['memflow'], frame_name))
+
+                if 'swintexco' in save_components:
+                    swintexco_rgb = lab_tensor_to_rgb(results['swintexco'].squeeze(0))
+                    swintexco_rgb.save(os.path.join(debug_dirs['swintexco'], frame_name))
+
+                if 'confidence' in save_components:
+                    conf_data = results['memflow_conf'].cpu().numpy()
+                    conf_heatmap = visualize_heatmap(results['memflow_conf'], colormap=colormap)
+                    conf_heatmap.save(os.path.join(debug_dirs['confidence'], frame_name))
+                    if save_npy:
+                        conf_npy_path = os.path.join(debug_dirs['confidence_npy'],
+                                                     os.path.splitext(frame_name)[0] + '.npy')
+                        np.save(conf_npy_path, conf_data)
+                    # Collect values for statistics
+                    confidence_values.extend(conf_data.flatten())
+
+                if 'similarity' in save_components:
+                    sim_data = results['swintexco_sim'].cpu().numpy()
+                    sim_heatmap = visualize_heatmap(results['swintexco_sim'], colormap=colormap)
+                    sim_heatmap.save(os.path.join(debug_dirs['similarity'], frame_name))
+                    if save_npy:
+                        sim_npy_path = os.path.join(debug_dirs['similarity_npy'],
+                                                    os.path.splitext(frame_name)[0] + '.npy')
+                        np.save(sim_npy_path, sim_data)
+                    # Collect values for statistics
+                    similarity_values.extend(sim_data.flatten())
+            else:
+                # Normal mode: only final result
+                output_lab = results
+
+            # Store LAB tensor for next frame (no PIL roundtrip)
+            prev_lab_tensor = output_lab.squeeze(0).cpu()
+
+            # Upscale predicted ab to original size, combine with original L
+            large_L = large_L_tensors[i].unsqueeze(0)  # [1, 1, H_orig, W_orig]
+            H_orig, W_orig = large_L.shape[2], large_L.shape[3]
+            output_ab = output_lab[:, 1:3, :, :].cpu()  # [1, 2, H, W]
+            large_ab = torch.nn.functional.interpolate(
+                output_ab,
+                size=(H_orig, W_orig),
+                mode="bilinear",
+                align_corners=False
+            )
+            large_lab = torch.cat([large_L, large_ab], dim=1).squeeze(0)  # [3, H_orig, W_orig]
+            output_rgb = lab_tensor_to_rgb(large_lab)
+            colorized_frames.append(output_rgb)
+
+    # Save results with original filenames
+    os.makedirs(output_scene_path, exist_ok=True)
+    print(f"  💾 Saving colorized frames...")
+
+    for original_path, colorized_frame in zip(frame_files, colorized_frames):
+        # Preserve original filename
+        frame_name = os.path.basename(original_path)
+        output_path = os.path.join(output_scene_path, frame_name)
+        colorized_frame.save(output_path)
+
+    print(f"  ✅ Saved {len(colorized_frames)} frames to {output_scene_path}")
+
+    # Compute and save statistics if debug output is enabled
+    scene_stats = {}
+    if debug_output_path and save_components:
+        scene_name = os.path.basename(scene_path)
+        stats_dir = os.path.join(debug_output_path, scene_name)
+
+        if confidence_values and len(confidence_values) > 0:
+            conf_array = np.array(confidence_values)
+            conf_stats = compute_heatmap_stats(conf_array)
+            if conf_stats:
+                stats_path = os.path.join(stats_dir, 'confidence_stats.txt')
+                write_stats_to_file(conf_stats, stats_path, 'MemFlow Confidence', num_frames=len(frame_files))
+                scene_stats['confidence'] = conf_stats
+                scene_stats['confidence_values'] = conf_array
+                print(f"  📊 Saved confidence statistics to {stats_path}")
+
+        if similarity_values and len(similarity_values) > 0:
+            sim_array = np.array(similarity_values)
+            sim_stats = compute_heatmap_stats(sim_array)
+            if sim_stats:
+                stats_path = os.path.join(stats_dir, 'similarity_stats.txt')
+                write_stats_to_file(sim_stats, stats_path, 'SwinTExCo Similarity', num_frames=len(frame_files))
+                scene_stats['similarity'] = sim_stats
+                scene_stats['similarity_values'] = sim_array
+                print(f"  📊 Saved similarity statistics to {stats_path}")
+
+    return scene_stats
+
+
+def process_datasets(system, input_dirs, output_dir, target_size=(224, 224),
+                     debug_output=None, save_components=None, colormap='turbo', save_npy=False):
+    """
+    Process multiple datasets with scene directories
+
+    Args:
+        system: FusionSystem
+        input_dirs: List of dataset root directories
+        output_dir: Root output directory
+        target_size: (H, W) tuple
+        debug_output: Optional path to save intermediate results
+        save_components: List of components to save
+        colormap: Colormap for heatmaps
+        save_npy: Whether to save raw .npy files
+    """
+    print("\n" + "="*80)
+    print(f"📂 Scanning {len(input_dirs)} dataset(s)...")
+    print("="*80)
+
+    # Collect all scene directories from all input paths
+    all_scenes = []
+    for input_dir in input_dirs:
+        if not os.path.exists(input_dir):
+            print(f"⚠️  Warning: directory not found: {input_dir}")
+            continue
+
+        print(f"\n📁 Scanning: {input_dir}")
+        scene_count = 0
+        for item in sorted(os.listdir(input_dir)):
+            item_path = os.path.join(input_dir, item)
+            if os.path.isdir(item_path):
+                all_scenes.append((item, item_path))
+                scene_count += 1
+        print(f"   Found {scene_count} scenes")
+
+    if len(all_scenes) == 0:
+        print("❌ No scene directories found!")
+        return
+
+    print(f"\n📊 Total: {len(all_scenes)} scenes to process\n")
+
+    # Collect global statistics
+    global_confidence_values = []
+    global_similarity_values = []
+
+    # Process each scene
+    for scene_idx, (scene_name, scene_path) in enumerate(all_scenes, 1):
+        print(f"🎬 [{scene_idx}/{len(all_scenes)}] Processing: {scene_name}")
+
+        output_scene_path = os.path.join(output_dir, scene_name)
+
+        try:
+            scene_stats = process_scene(
+                system,
+                scene_path,
+                output_scene_path,
+                target_size=target_size,
+                debug_output_path=debug_output,
+                save_components=save_components,
+                colormap=colormap,
+                save_npy=save_npy
+            )
+
+            # Collect values for global statistics
+            if scene_stats:
+                if 'confidence_values' in scene_stats:
+                    global_confidence_values.extend(scene_stats['confidence_values'].flatten())
+                if 'similarity_values' in scene_stats:
+                    global_similarity_values.extend(scene_stats['similarity_values'].flatten())
+
+        except Exception as e:
+            print(f"  ❌ Error processing {scene_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+        print()  # Empty line between scenes
+
+    # Save global statistics if multiple scenes processed
+    if debug_output and len(all_scenes) > 1:
+        print("\n" + "="*80)
+        print("📊 Computing global statistics across all scenes...")
+        print("="*80)
+
+        if len(global_confidence_values) > 0:
+            conf_array = np.array(global_confidence_values)
+            conf_stats = compute_heatmap_stats(conf_array)
+            if conf_stats:
+                stats_path = os.path.join(debug_output, 'global_confidence_stats.txt')
+                write_stats_to_file(conf_stats, stats_path,
+                                   f'MemFlow Confidence (Global - {len(all_scenes)} scenes)',
+                                   num_frames=None)
+                print(f"  Mean: {conf_stats['mean']:.4f}, Std: {conf_stats['std']:.4f}")
+                print(f"  P5-P95: [{conf_stats['p5']:.4f}, {conf_stats['p95']:.4f}]")
+                print(f"  📊 Saved to {stats_path}")
+
+        if len(global_similarity_values) > 0:
+            sim_array = np.array(global_similarity_values)
+            sim_stats = compute_heatmap_stats(sim_array)
+            if sim_stats:
+                stats_path = os.path.join(debug_output, 'global_similarity_stats.txt')
+                write_stats_to_file(sim_stats, stats_path,
+                                   f'SwinTExCo Similarity (Global - {len(all_scenes)} scenes)',
+                                   num_frames=None)
+                print(f"  Mean: {sim_stats['mean']:.4f}, Std: {sim_stats['std']:.4f}")
+                print(f"  P5-P95: [{sim_stats['p5']:.4f}, {sim_stats['p95']:.4f}]")
+                print(f"  📊 Saved to {stats_path}")
+
+    print("="*80)
+    print(f"✅ All datasets processed!")
+    print(f"📁 Results saved to: {output_dir}")
+    print("="*80)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='FlowChroma Dataset Batch Inference')
+
+    # Model paths
+    parser.add_argument('--memflow_path', type=str, required=True,
+                        help='Path to MemFlow repository')
+    parser.add_argument('--swintexco_path', type=str, required=True,
+                        help='Path to SwinSingle repository')
+    parser.add_argument('--memflow_ckpt', type=str, required=True,
+                        help='Path to MemFlow checkpoint')
+    parser.add_argument('--swintexco_ckpt', type=str, default=None,
+                        help='Path to SwinTExCo checkpoint directory (optional: '
+                             'weights are loaded from --fusion_ckpt if available)')
+    parser.add_argument('--fusion_ckpt', type=str, required=True,
+                        help='Path to trained fusion checkpoint')
+
+    # Input/Output
+    parser.add_argument('--input_dirs', type=str, required=True,
+                        help='Comma-separated dataset root directories (e.g., /path1,/path2)')
+    parser.add_argument('--output_dir', type=str, required=True,
+                        help='Output root directory')
+
+    # Processing
+    parser.add_argument('--target_size', type=int, nargs=2, default=[224, 224],
+                        help='Target frame size (H W), default: 224 224')
+
+    # Debug output
+    parser.add_argument('--debug_output', type=str, default=None,
+                        help='Path to save intermediate results (optional)')
+    parser.add_argument('--save_components', nargs='+',
+                        default=None,
+                        choices=['memflow', 'swintexco', 'confidence', 'similarity'],
+                        help='Which components to save (default: None, save all if debug_output is set)')
+    parser.add_argument('--heatmap_colormap', type=str, default='turbo',
+                        choices=['turbo', 'viridis', 'jet', 'hot'],
+                        help='Colormap for confidence/similarity heatmaps (default: turbo)')
+    parser.add_argument('--save_npy', action='store_true',
+                        help='Save raw .npy files for confidence/similarity maps')
+
+    # Device
+    parser.add_argument('--device', type=str, default='cuda',
+                        help='Device (cuda or cpu)')
+
+    # Profiling
+    parser.add_argument('--profile', action='store_true',
+                        help='Profile forward pass and report per-component GPU time')
+    parser.add_argument('--profile_frames', type=int, default=5,
+                        help='Number of frames to profile (default: 5)')
+
+    args = parser.parse_args()
+
+    # Set default save_components if debug_output is provided
+    if args.debug_output and args.save_components is None:
+        args.save_components = ['memflow', 'swintexco', 'confidence', 'similarity']
+
+    print("="*80)
+    print(" FlowChroma Dataset Batch Inference".center(80))
+    print("="*80)
+
+    # Parse input directories
+    input_dirs = [d.strip() for d in args.input_dirs.split(',')]
+    print(f"\nInput directories: {len(input_dirs)}")
+    for i, d in enumerate(input_dirs, 1):
+        print(f"  [{i}] {d}")
+
+    # Initialize system
+    print("\nInitializing FlowChroma system...")
+    system = FusionSystem(
+        memflow_path=args.memflow_path,
+        swintexco_path=args.swintexco_path,
+        memflow_ckpt=args.memflow_ckpt,
+        swintexco_ckpt=args.swintexco_ckpt,
+        fusion_net=FusionNetV1(),
+        device=args.device
+    )
+    system.eval()
+
+    # Load trained checkpoint
+    load_checkpoint(system, args.fusion_ckpt, args.device)
+
+    # Profiling（在正式推理前執行，只需加 --profile 參數）
+    if args.profile:
+        profile_inference(system, tuple(args.target_size), args.device, args.profile_frames)
+
+    # Process datasets
+    target_size = tuple(args.target_size)
+    process_datasets(
+        system=system,
+        input_dirs=input_dirs,
+        output_dir=args.output_dir,
+        target_size=target_size,
+        debug_output=args.debug_output,
+        save_components=args.save_components,
+        colormap=args.heatmap_colormap,
+        save_npy=args.save_npy
+    )
+
+    print("\n" + "="*80)
+    print("✅ Inference completed!")
+    print("="*80)
+
+
+if __name__ == '__main__':
+    main()
