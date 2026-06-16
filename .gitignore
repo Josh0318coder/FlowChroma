@@ -1,0 +1,10 @@
+BiSTNet/
+Color2Embed/
+SwinTExCo/
+TCVC2023/
+automatic-video-colorization/
+siggraphasia2019_remastering/
+__pycache__/
+*.pyc
+*.pth
+*.pt
