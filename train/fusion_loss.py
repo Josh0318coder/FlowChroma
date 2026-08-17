@@ -717,3 +717,67 @@ def discriminator_loss_fn(real_data_lab, fake_data_lab, discriminator):
         + torch.mean((y_pred_fake - torch.mean(y_pred_real) + y) ** 2)
     ) / 2
     return discriminator_loss
+
+
+# ===========================
+# Standard (log) GAN Loss — matches thesis Eq. (3.36) / (3.37)
+# Kept alongside the RaLSGAN variant above so the two can be swapped for comparison.
+# NOTE: Discriminator_x64_224 outputs raw logits (no sigmoid), so we use
+# binary_cross_entropy_with_logits, which applies the sigmoid internally.
+# Do NOT add an explicit sigmoid, or it would be applied twice.
+# ===========================
+
+def generator_loss_fn_loggan(real_data_lab, fake_data_lab, discriminator, weight_gan, device):
+    """
+    Standard (log) GAN Generator Loss — thesis Eq. (3.37), non-saturating form.
+
+        L_G = -E[log D(fake)]        with D = sigmoid(discriminator logits)
+
+    Non-saturating is the standard practical form (avoids the vanishing
+    gradients of the original minimax +E[log(1 - D(fake))]).
+
+    Args:
+        real_data_lab: [B, C, H, W] real input (unused here; kept for a signature
+                       matching generator_loss_fn so call sites can swap freely)
+        fake_data_lab: [B, C, H, W] generated input
+        discriminator: Discriminator network (returns raw logits)
+        weight_gan: Weight for GAN loss
+        device: torch device
+
+    Returns:
+        generator_loss: scalar
+    """
+    if weight_gan > 0:
+        y_pred_fake, _ = discriminator(fake_data_lab)
+        target_real = torch.ones_like(y_pred_fake)  # generator wants fake judged as real
+        generator_loss = F.binary_cross_entropy_with_logits(y_pred_fake, target_real) * weight_gan
+        return generator_loss
+
+    return torch.tensor([0.0], device=device)
+
+
+def discriminator_loss_fn_loggan(real_data_lab, fake_data_lab, discriminator):
+    """
+    Standard (log) GAN Discriminator Loss — thesis Eq. (3.36).
+
+        L_D = -E[log D(real)] - E[log(1 - D(fake))]
+              with D = sigmoid(discriminator logits)
+
+    Args:
+        real_data_lab: [B, C, H, W] real input
+        fake_data_lab: [B, C, H, W] generated input (detached)
+        discriminator: Discriminator network (returns raw logits)
+
+    Returns:
+        discriminator_loss: scalar
+    """
+    y_pred_fake, _ = discriminator(fake_data_lab.detach())
+    y_pred_real, _ = discriminator(real_data_lab.detach())
+
+    target_real = torch.ones_like(y_pred_real)   # real -> 1
+    target_fake = torch.zeros_like(y_pred_fake)  # fake -> 0
+    discriminator_loss = (
+        F.binary_cross_entropy_with_logits(y_pred_real, target_real)
+        + F.binary_cross_entropy_with_logits(y_pred_fake, target_fake)
+    )
+    return discriminator_loss
