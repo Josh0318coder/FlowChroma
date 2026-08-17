@@ -180,11 +180,11 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                     prev_pred_lab_full=outputs[i-1] if i >= 1 else None
                 )
 
-                # GAN Loss — single-frame 3ch
+                # GAN Loss — single-frame 3ch (computed on frame 1)
                 discriminator_loss = torch.tensor(0.0, device=args.device)
                 generator_loss = torch.tensor(0.0, device=args.device)
 
-                if i == 0 and discriminator is not None and args.weight_gan > 0:
+                if i == 1 and discriminator is not None and args.weight_gan > 0:
                     fake_data_lab = torch.cat((output_lab[:, 0:1, :, :], output_ab), dim=1)  # [B, 3, H, W]
                     real_data_lab = torch.cat((gt_lab[:, 0:1, :, :], gt_ab), dim=1)  # [B, 3, H, W]
                     with autocast(enabled=False):
@@ -237,6 +237,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                     real_ab_diff = frames_lab_stacked[i-1][:, 1:3] - gt_lab[:, 1:3]  # [B, 2, H, W]
                     real_3ch_diff = torch.cat([real_ab_diff, l_diff], dim=1).float()  # [B, 3, H, W]
 
+                    # Select adversarial loss form: RaLSGAN (default) or log-GAN (thesis Eq. 3.36/3.37)
                     d_loss_fn = discriminator_loss_fn_loggan if args.gan_type == 'loggan' else discriminator_loss_fn
                     g_loss_fn = generator_loss_fn_loggan if args.gan_type == 'loggan' else generator_loss_fn
 
@@ -257,7 +258,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                             for p in discriminator_diff.parameters():
                                 p.requires_grad_(True)
 
-                # Store loss_dicts per frame; GAN losses live at frame 0 (single-frame D)
+                # Store loss_dicts per frame; GAN losses live at frame 1 (single-frame D)
                 loss_dict['discriminator'] = discriminator_loss.item()
                 loss_dict['generator'] = generator_loss.item()
                 loss_dict['discriminator_temp'] = discriminator_temp_loss.item()
@@ -284,8 +285,8 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                 frame_losses.append(loss)
 
         # Update latest_d_loss for D skip decision
-        if frame_0_loss_dict and 'discriminator' in frame_0_loss_dict:
-            latest_d_loss = frame_0_loss_dict['discriminator']
+        if frame_1_loss_dict and 'discriminator' in frame_1_loss_dict:
+            latest_d_loss = frame_1_loss_dict['discriminator']
         if frame_1_loss_dict and 'discriminator_temp' in frame_1_loss_dict:
             latest_d_temp_loss = frame_1_loss_dict['discriminator_temp']
         if frame_1_loss_dict and 'discriminator_diff' in frame_1_loss_dict:
@@ -364,13 +365,14 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
         epoch_losses['total'] += batch_loss.item()
         step_losses['total'] += batch_loss.item()
         if frame_0_loss_dict:
-            for key in ['l1_ref', 'l1_gt', 'perceptual', 'contextual', 'smooth', 'discriminator', 'generator']:
+            for key in ['l1_ref', 'l1_gt', 'perceptual', 'contextual', 'smooth']:
                 if key in frame_0_loss_dict:
                     epoch_losses[key] += frame_0_loss_dict[key]
                     step_losses[key] += frame_0_loss_dict[key]
         if frame_1_loss_dict:
             for key in ['l1_ref', 'l1_gt', 'temporal', 'smooth',
                         'cdc',
+                        'discriminator', 'generator',
                         'discriminator_temp', 'generator_temp',
                         'discriminator_diff', 'generator_diff']:
                 if key in frame_1_loss_dict:
@@ -400,12 +402,12 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                 postfix_dict['ctx'] = f"{frame_0_loss_dict['contextual']:.4f}"
             if 'perceptual' in frame_0_loss_dict:
                 postfix_dict['per'] = f"{frame_0_loss_dict['perceptual']:.4f}"
-        # GAN losses from frame 0 (single-frame discriminator)
-        if frame_0_loss_dict:
-            if 'discriminator' in frame_0_loss_dict:
-                postfix_dict['dis'] = f"{frame_0_loss_dict['discriminator']:.4f}"
-            if 'generator' in frame_0_loss_dict:
-                postfix_dict['gan'] = f"{frame_0_loss_dict['generator']:.4f}"
+        # GAN losses from frame 1 (single-frame discriminator)
+        if frame_1_loss_dict:
+            if frame_1_loss_dict.get('discriminator', 0) > 0:
+                postfix_dict['dis'] = f"{frame_1_loss_dict['discriminator']:.4f}"
+            if frame_1_loss_dict.get('generator', 0) > 0:
+                postfix_dict['gan'] = f"{frame_1_loss_dict['generator']:.4f}"
         # Temporal GAN losses from frame 1 (frame-pair discriminator)
         if frame_1_loss_dict:
             if frame_1_loss_dict.get('discriminator_temp', 0) > 0:
@@ -486,13 +488,13 @@ def main():
                         help='Weight for align component in adaptive temporal loss (default: 1.0)')
     parser.add_argument('--lambda_smooth', type=float, default=150.0,
                         help='Weight for spatial smoothness loss (default: 0.3)')
-    parser.add_argument('--lambda_cdc', type=float, default=8.0,
+    parser.add_argument('--lambda_cdc', type=float, default=9.0,#9.0
                         help='Weight for color consistency loss (Wasserstein-1, targets CDC metric, default: 0)')
     parser.add_argument('--use_adaptive_temporal', action='store_true', default=True,
                         help='Use adaptive temporal loss (no optical flow required)')
 
     # Logging
-    parser.add_argument('--checkpoint_step', type=int, default=500,
+    parser.add_argument('--checkpoint_step', type=int, default=10000,
                         help='Print average loss every N optimizer steps (default: 500, following newsingle)')
 
     # GAN Loss (from SwinSingle)
@@ -500,7 +502,7 @@ def main():
                         help='Weight for GAN loss (default: 0.015, set 0 to disable)')
     parser.add_argument('--weight_gan_temp', type=float, default=0.0,
                         help='Weight for temporal GAN loss — frame-pair discriminator (default: 0, set e.g. 0.005)')
-    parser.add_argument('--weight_gan_diff', type=float, default=0.0,
+    parser.add_argument('--weight_gan_diff', type=float, default=0.015,#0.015
                         help='Weight for diff GAN loss — method D: AB_diff+L_diff 3ch discriminator (default: 0, set e.g. 0.005)')
     parser.add_argument('--epoch_train_discriminator', type=int, default=0,
                         help='Start generator GAN loss after N epochs (default: 0)')
@@ -510,7 +512,7 @@ def main():
                         help='Reset discriminator to random init even when resuming (for testing D collapse)')
     parser.add_argument('--reset_scheduler', action='store_true',
                         help='Reset LR scheduler when resuming (use when extending training beyond original epochs)')
-    parser.add_argument('--d_skip_threshold', type=float, default=0.4,
+    parser.add_argument('--d_skip_threshold', type=float, default=0.0,
                         help='Skip D update when dis loss is below this threshold (default: 0.4)')
     parser.add_argument('--gan_type', type=str, default='ralsgan',
                         choices=['ralsgan', 'loggan'],
@@ -518,7 +520,7 @@ def main():
                              'ralsgan (default, current code) or loggan (thesis Eq. 3.36/3.37)')
 
     # Checkpointing
-    parser.add_argument('--save_dir', type=str, default='fusion/checkpoints/cdc_8',
+    parser.add_argument('--save_dir', type=str, default='fusion/checkpoints/test1',
                         help='Directory to save checkpoints')
     parser.add_argument('--save_freq', type=int, default=1,
                         help='Save checkpoint every N epochs')
@@ -587,7 +589,7 @@ def main():
     criterion = FusionLoss(
         lambda_l1=0.0,
         lambda_l1_gt=args.lambda_l1_gt,
-        lambda_perceptual=0.15,
+        lambda_perceptual=0.15,#0.15
         lambda_contextual=0.0,
         lambda_temporal=args.lambda_temporal,
         lambda_align=args.lambda_align,
