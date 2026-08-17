@@ -42,7 +42,10 @@ sys.path.insert(0, '.')
 
 from train.fusion_system import FusionSystem
 from FusionNet.fusion_unet import FusionNetV1
-from train.fusion_loss import FusionLoss, discriminator_loss_fn, generator_loss_fn
+from train.fusion_loss import (
+    FusionLoss, discriminator_loss_fn, generator_loss_fn,
+    discriminator_loss_fn_loggan, generator_loss_fn_loggan,
+)
 from train.fusion_dataset import FusionSequenceDataset, fusion_sequence_collate_fn
 from train.discriminator import Discriminator
 
@@ -234,8 +237,11 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                     real_ab_diff = frames_lab_stacked[i-1][:, 1:3] - gt_lab[:, 1:3]  # [B, 2, H, W]
                     real_3ch_diff = torch.cat([real_ab_diff, l_diff], dim=1).float()  # [B, 3, H, W]
 
+                    d_loss_fn = discriminator_loss_fn_loggan if args.gan_type == 'loggan' else discriminator_loss_fn
+                    g_loss_fn = generator_loss_fn_loggan if args.gan_type == 'loggan' else generator_loss_fn
+
                     with autocast(enabled=False):
-                        discriminator_diff_loss = discriminator_loss_fn(
+                        discriminator_diff_loss = d_loss_fn(
                             real_3ch_diff, fake_3ch_diff, discriminator_diff
                         )
                         (discriminator_diff_loss / args.accumulation_steps).backward()
@@ -243,7 +249,7 @@ def train_epoch(system, dataloader, criterion, optimizer, scaler, epoch, args, d
                         if epoch > args.epoch_train_discriminator:
                             for p in discriminator_diff.parameters():
                                 p.requires_grad_(False)
-                            generator_diff_loss = generator_loss_fn(
+                            generator_diff_loss = g_loss_fn(
                                 real_3ch_diff, fake_3ch_diff,
                                 discriminator_diff, args.weight_gan_diff, args.device
                             )
@@ -506,6 +512,10 @@ def main():
                         help='Reset LR scheduler when resuming (use when extending training beyond original epochs)')
     parser.add_argument('--d_skip_threshold', type=float, default=0.4,
                         help='Skip D update when dis loss is below this threshold (default: 0.4)')
+    parser.add_argument('--gan_type', type=str, default='ralsgan',
+                        choices=['ralsgan', 'loggan'],
+                        help='Adversarial loss form for the diff discriminator: '
+                             'ralsgan (default, current code) or loggan (thesis Eq. 3.36/3.37)')
 
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='fusion/checkpoints/cdc_8',
